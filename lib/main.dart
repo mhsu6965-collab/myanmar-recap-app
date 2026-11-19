@@ -27,9 +27,9 @@ class _RecapHomePageState extends State<RecapHomePage> {
   bool _isProcessing = false;
 
   Future<void> _pickVideo() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.video);
-    if (result != null && result.files.single.path != null) {
-      setState(() => _videoPath = result.files.single.path);
+    final file = await FilePicker.pickFile(type: FileType.video);
+    if (file != null && file.path != null) {
+      setState(() => _videoPath = file.path);
     }
   }
 
