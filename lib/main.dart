@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:video_player/video_player.dart';
 import 'services/gemini_service.dart';
@@ -50,7 +51,10 @@ class RecapHomePage extends StatefulWidget {
 class _RecapHomePageState extends State<RecapHomePage> {
   final _groqKeyCtrl = TextEditingController();
   final _geminiKeysCtrl = TextEditingController();
-  String _apiProvider = 'Hybrid';
+  final _manualScriptCtrl = TextEditingController();
+
+  // Default ကို Manual (Groq နားထောင် -> ကိုယ်တိုင်ဘာသာပြန် -> TTS) ထားပေးထားပါတယ်
+  String _apiProvider = 'Manual';
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -65,6 +69,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
   int _currentStep = 0;
   bool _isProcessing = false;
+  bool _isTranscribing = false;
   String _errorMsg = '';
   String _outputPath = '';
   String _script = '';
@@ -119,6 +124,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
     _videoCtrl?.dispose();
     _groqKeyCtrl.dispose();
     _geminiKeysCtrl.dispose();
+    _manualScriptCtrl.dispose();
     super.dispose();
   }
 
@@ -139,6 +145,41 @@ class _RecapHomePageState extends State<RecapHomePage> {
     }
   }
 
+  // Manual စနစ်အတွက်: Groq Whisper ဖြင့် အသံသက်သက် နားထောင်ပြီး Script ထုတ်ပေးမည်
+  Future<void> _extractTranscriptOnly() async {
+    await _saveKeys();
+    if (_videoPath == null) {
+      setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
+      return;
+    }
+    if (_groqKeyCtrl.text.trim().isEmpty) {
+      setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
+      return;
+    }
+
+    setState(() {
+      _isTranscribing = true;
+      _errorMsg = '';
+      _logs.clear();
+      _currentStep = 1;
+    });
+
+    try {
+      _addLog('Groq: ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
+      final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
+      _addLog('Groq: Script ထုတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။ Copy ကူးပြီး ဘာသာပြန်နိုင်ပါပြီ။');
+      setState(() {
+        _manualScriptCtrl.text = transcript;
+        _currentStep = 2;
+      });
+    } catch (e) {
+      _addLog('❌ Error: $e');
+      setState(() => _errorMsg = e.toString());
+    } finally {
+      setState(() => _isTranscribing = false);
+    }
+  }
+
   Future<void> _startRecap() async {
     await _saveKeys();
     final geminiKeys = _parseGeminiKeys();
@@ -147,13 +188,21 @@ class _RecapHomePageState extends State<RecapHomePage> {
       setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
       return;
     }
-    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Groq') && _groqKeyCtrl.text.trim().isEmpty) {
-      setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
-      return;
-    }
-    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && geminiKeys.isEmpty) {
-      setState(() => _errorMsg = 'Gemini API Key အနည်းဆုံး ၁ ခု ထည့်ပါ');
-      return;
+
+    if (_apiProvider == 'Manual') {
+      if (_manualScriptCtrl.text.trim().isEmpty) {
+        setState(() => _errorMsg = 'ဘာသာပြန်ထားတဲ့ မြန်မာစာသားကို အကွက်ထဲ အရင် Paste ထည့်ပါ');
+        return;
+      }
+    } else {
+      if ((_apiProvider == 'Hybrid' || _apiProvider == 'Groq') && _groqKeyCtrl.text.trim().isEmpty) {
+        setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
+        return;
+      }
+      if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && geminiKeys.isEmpty) {
+        setState(() => _errorMsg = 'Gemini API Key အနည်းဆုံး ၁ ခု ထည့်ပါ');
+        return;
+      }
     }
 
     setState(() {
@@ -161,7 +210,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
       _errorMsg = '';
       _outputPath = '';
       _logs.clear();
-      _currentStep = 1;
+      _currentStep = _apiProvider == 'Manual' ? 3 : 1;
     });
 
     try {
@@ -170,19 +219,18 @@ class _RecapHomePageState extends State<RecapHomePage> {
       final srtPath = '${tempDir.path}/subs.srt';
 
       String script;
-      if (_apiProvider == 'Hybrid') {
+      if (_apiProvider == 'Manual') {
+        script = _manualScriptCtrl.text.trim();
+        _addLog('Manual: ထည့်ထားသော မြန်မာစာသား (စာလုံးရေ ${script.length}) ဖြင့် TTS စတင်ထုတ်နေသည်...');
+      } else if (_apiProvider == 'Hybrid') {
         _addLog('Groq: အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
         final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
         _addLog('Groq: အသံဖတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
 
         setState(() => _currentStep = 2);
         script = await GeminiService(geminiKeys).translateToMyanmarRecap(transcript, onLog: _addLog);
-      } else if (_apiProvider == 'Gemini') {
-        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!, onLog: _addLog);
-        setState(() => _currentStep = 2);
       } else {
-        _addLog('Groq: အသံနားထောင်ပြီး ဘာသာပြန်နေသည်...');
-        script = await GroqService(_groqKeyCtrl.text.trim()).generateRecapScript(_videoPath!);
+        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!, onLog: _addLog);
         setState(() => _currentStep = 2);
       }
 
@@ -323,7 +371,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
     Widget icon;
     if (_currentStep > stepNum || _currentStep == 5) {
       icon = const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20);
-    } else if (_currentStep == stepNum && _isProcessing) {
+    } else if (_currentStep == stepNum && (_isProcessing || _isTranscribing)) {
       icon = const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.2, color: Color(0xFF00E5FF)));
     } else {
       icon = const Icon(Icons.radio_button_unchecked, color: Colors.white30, size: 20);
@@ -369,7 +417,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _sectionCard(
-              title: 'API Settings',
+              title: 'API & Script Settings',
               icon: Icons.key_rounded,
               child: Column(
                 children: [
@@ -377,13 +425,13 @@ class _RecapHomePageState extends State<RecapHomePage> {
                     value: _apiProvider,
                     decoration: const InputDecoration(labelText: 'Script စနစ်ရွေးပါ'),
                     items: const [
+                      DropdownMenuItem(value: 'Manual', child: Text('Manual (Groq နားထောင် → ကိုယ်တိုင်ဘာသာပြန်)')),
                       DropdownMenuItem(value: 'Hybrid', child: Text('Hybrid (Groq နားထောင် + Gemini ဘာသာပြန်)')),
-                      DropdownMenuItem(value: 'Groq', child: Text('Groq API တစ်ခုတည်း (အမြန်ဆုံး)')),
                       DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini တစ်ခုတည်း')),
                     ],
                     onChanged: (v) => setState(() => _apiProvider = v!),
                   ),
-                  if (_apiProvider == 'Hybrid' || _apiProvider == 'Groq') ...[
+                  if (_apiProvider == 'Manual' || _apiProvider == 'Hybrid') ...[
                     const SizedBox(height: 10),
                     TextField(
                       controller: _groqKeyCtrl,
@@ -413,7 +461,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   OutlinedButton.icon(
-                    onPressed: _isProcessing ? null : _pickVideo,
+                    onPressed: (_isProcessing || _isTranscribing) ? null : _pickVideo,
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       side: const BorderSide(color: Color(0xFF7C4DFF)),
@@ -477,6 +525,70 @@ class _RecapHomePageState extends State<RecapHomePage> {
               ),
             ),
 
+            // Manual Mode: Groq ဖြင့် Script ထုတ် -> Copy -> ဘာသာပြန် Paste ပြန်ထည့်
+            if (_apiProvider == 'Manual')
+              _sectionCard(
+                title: 'Manual Script (Groq → ကိုယ်တိုင်ဘာသာပြန်)',
+                icon: Icons.translate_rounded,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: (_isProcessing || _isTranscribing) ? null : _extractTranscriptOnly,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF262A38),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      icon: const Icon(Icons.hearing_rounded, color: Color(0xFF00E5FF)),
+                      label: Text(
+                        _isTranscribing ? 'Groq ဖြင့် နားထောင်နေသည်...' : '🎧 ၁။ Groq ဖြင့် Script ထုတ်မယ်',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _manualScriptCtrl,
+                      maxLines: 6,
+                      decoration: const InputDecoration(
+                        labelText: 'Script / မြန်မာဘာသာပြန်စာသား',
+                        hintText: 'Groq မှထွက်လာသော Script ကို Copy ကူးပြီး ဘာသာပြန်ကာ ဒီနေရာမှာ ပြန် Paste ထည့်ပါ...',
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: _manualScriptCtrl.text));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Script ကို Copy ကူးပြီးပါပြီ'), duration: Duration(seconds: 2)),
+                              );
+                            },
+                            icon: const Icon(Icons.copy, size: 16),
+                            label: const Text('Copy ကူးမယ်'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final data = await Clipboard.getData('text/plain');
+                              if (data?.text != null) {
+                                setState(() => _manualScriptCtrl.text = data!.text!);
+                              }
+                            },
+                            icon: const Icon(Icons.paste, size: 16),
+                            label: const Text('Paste ထည့်မယ်'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
             _sectionCard(
               title: 'Edge TTS Voice',
               icon: Icons.record_voice_over_rounded,
@@ -513,7 +625,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                 borderRadius: BorderRadius.circular(14),
               ),
               child: ElevatedButton(
-                onPressed: _isProcessing ? null : _startRecap,
+                onPressed: (_isProcessing || _isTranscribing) ? null : _startRecap,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.transparent,
                   shadowColor: Colors.transparent,
@@ -521,7 +633,9 @@ class _RecapHomePageState extends State<RecapHomePage> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
                 child: Text(
-                  _isProcessing ? 'လုပ်ဆောင်နေပါသည်...' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်',
+                  _isProcessing
+                      ? 'လုပ်ဆောင်နေပါသည်...'
+                      : (_apiProvider == 'Manual' ? '🚀 ၂။ TTS နှင့် ဗီဒီယို စတင်ထုတ်မယ်' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်'),
                   style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
                 ),
               ),
@@ -535,7 +649,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                 child: Column(
                   children: [
                     _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
-                    _buildStepTile(2, '၂။ မြန်မာဘာသာသို့ အမြန်တိုက်ရိုက်ဘာသာပြန်ခြင်း'),
+                    _buildStepTile(2, '၂။ မြန်မာဘာသာပြန် Script ပြင်ဆင်ခြင်း'),
                     _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထုတ်ခြင်း'),
                     _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း'),
                     _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
@@ -573,12 +687,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: Text('❌ Error: $_errorMsg', style: const TextStyle(color: Colors.redAccent)),
-              ),
-            if (_script.isNotEmpty)
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(color: const Color(0xFF181B24), borderRadius: BorderRadius.circular(12)),
-                child: Text(_script, style: const TextStyle(color: Colors.white70, height: 1.5)),
               ),
           ],
         ),
