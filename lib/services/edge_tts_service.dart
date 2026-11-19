@@ -44,15 +44,15 @@ class EdgeTtsService {
   }) async {
     final requestId = const Uuid().v4().replaceAll('-', '');
     final secMsGec = _generateSecMsGec();
+    final muid = const Uuid().v4().replaceAll('-', '').toUpperCase();
 
     final wsUrl =
-        'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
-        '?TrustedClientToken=$_trustedToken'
+        'wss://api.msedgeservices.com/tts/cognitiveservices/websocket/v1'
+        '?Ocp-Apim-Subscription-Key=$_trustedToken'
         '&Sec-MS-GEC=$secMsGec'
         '&Sec-MS-GEC-Version=1-$_chromiumVersion'
         '&ConnectionId=$requestId';
 
-    final muid = const Uuid().v4().replaceAll('-', '').toUpperCase();
     final channel = IOWebSocketChannel.connect(
       Uri.parse(wsUrl),
       headers: {
