@@ -2,11 +2,22 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/io.dart';
 
 class EdgeTtsService {
   static const _trustedToken = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+  static const _chromiumVersion = '130.0.2849.68';
+
+  // Microsoft Edge 403 မတက်အောင် Sec-MS-GEC Token ထုတ်ပေးမည့် Function
+  String _generateSecMsGec() {
+    int ticks = (DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000) + 11644473600;
+    ticks -= ticks % 300;
+    ticks *= 10000000;
+    final strToHash = '$ticks$_trustedToken';
+    return sha256.convert(utf8.encode(strToHash)).toString().toUpperCase();
+  }
 
   Future<void> synthesize({
     required String text,
@@ -15,15 +26,32 @@ class EdgeTtsService {
     required int pitchHz,
     required String audioOutPath,
     required String srtOutPath,
+    Function(String)? onLog,
   }) async {
+    onLog?.call('Edge TTS: Security Token ထုတ်ပြီး Microsoft Server ချိတ်နေသည်...');
     final requestId = const Uuid().v4().replaceAll('-', '');
+    final secMsGec = _generateSecMsGec();
     final rateStr = '${ratePercent >= 0 ? '+' : ''}$ratePercent%';
     final pitchStr = '${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz';
 
     final wsUrl =
-        'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=$_trustedToken&ConnectionId=$requestId';
+        'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
+        '?TrustedClientToken=$_trustedToken'
+        '&Sec-MS-GEC=$secMsGec'
+        '&Sec-MS-GEC-Version=1-$_chromiumVersion'
+        '&ConnectionId=$requestId';
 
-    final channel = IOWebSocketChannel.connect(Uri.parse(wsUrl));
+    final channel = IOWebSocketChannel.connect(
+      Uri.parse(wsUrl),
+      headers: {
+        'Pragma': 'no-cache',
+        'Cache-Control': 'no-cache',
+        'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+        'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+      },
+    );
+
     final audioBytes = BytesBuilder();
     final wordTimings = [];
     final completer = Completer<void>();
@@ -63,6 +91,7 @@ class EdgeTtsService {
         '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
     channel.sink.add(configMsg);
 
+    onLog?.call('Edge TTS: $voice (Speed $rateStr, Pitch $pitchStr) ဖြင့် အသံထုတ်နေသည်...');
     final escapedText = text
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
@@ -80,6 +109,7 @@ class EdgeTtsService {
     await completer.future;
 
     await File(audioOutPath).writeAsBytes(audioBytes.toBytes());
+    onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် SRT စာတန်းထိုးဖိုင် ပြီးစီးပါပြီ။');
 
     final srtBuffer = StringBuffer();
     int subIndex = 1;
