@@ -25,7 +25,7 @@ class EdgeTtsService {
 
     final channel = IOWebSocketChannel.connect(Uri.parse(wsUrl));
     final audioBytes = BytesBuilder();
-    final List> wordTimings = [];
+    final wordTimings = [];
     final completer = Completer<void>();
 
     channel.stream.listen((message) {
