@@ -36,7 +36,7 @@ class EdgeTtsService {
     return chunks.where((c) => c.isNotEmpty).toList();
   }
 
-  Future> _synthesizeChunk({
+  Future _synthesizeChunk({
     required String text,
     required String voice,
     required String rateStr,
@@ -66,7 +66,7 @@ class EdgeTtsService {
     await channel.ready;
 
     final audioBytes = BytesBuilder();
-    final wordTimings = >[];
+    final wordTimings = [];
     final completer = Completer<void>();
 
     channel.stream.listen((message) {
@@ -80,7 +80,7 @@ class EdgeTtsService {
             final meta = jsonDecode(message.substring(jsonStart));
             for (final item in meta['Metadata'] ?? []) {
               if (item['Type'] == 'WordBoundary') {
-                wordTimings.add(Map<String, dynamic>.from(item['Data']));
+                wordTimings.add(item['Data']);
               }
             }
           }
@@ -140,12 +140,12 @@ class EdgeTtsService {
     onLog?.call('Edge TTS: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး အသံထုတ်နေသည်...');
 
     final allAudio = BytesBuilder();
-    final allTimings = >[];
+    final allTimings = [];
     int timeOffsetTicks = 0;
 
     for (int i = 0; i < chunks.length; i++) {
       onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${chunks.length}) ထုတ်နေသည်...');
-      Map<String, dynamic>? result;
+      Map? result;
 
       for (int attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -164,7 +164,7 @@ class EdgeTtsService {
       }
 
       allAudio.add(result!['audio'] as Uint8List);
-      final chunkTimings = result['timings'] as List>;
+      final List chunkTimings = result['timings'] as List;
       int lastEnd = 0;
       for (final w in chunkTimings) {
         final offset = (w['Offset'] as int) + timeOffsetTicks;
@@ -174,7 +174,7 @@ class EdgeTtsService {
           lastEnd = (w['Offset'] as int) + dur;
         }
       }
-      timeOffsetTicks += lastEnd + 2000000; // အပိုင်းကြား 0.2s ခြားမယ်
+      timeOffsetTicks += lastEnd + 2000000;
     }
 
     await File(audioOutPath).writeAsBytes(allAudio.toBytes());
