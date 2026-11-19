@@ -26,9 +26,14 @@ jobs:
         run: |
           mkdir -p assets/fonts
           if [ -f Pyidaungsu.ttf ]; then mv Pyidaungsu.ttf assets/fonts/; fi
-          flutter create .
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle
+          flutter create --project-name myanmar_recap_tool .
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle.kts
+          fi
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle
+            sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle
+          fi
 
       - name: Build APK
         run: |
