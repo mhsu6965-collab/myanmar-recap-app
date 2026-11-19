@@ -37,11 +37,20 @@ class _RecapHomePageState extends State<RecapHomePage> {
   String _errorMsg = '';
   String _outputPath = '';
   String _script = '';
+  final List<String> _logs = [];
 
   @override
   void initState() {
     super.initState();
     _loadSavedKeys();
+  }
+
+  void _addLog(String msg) {
+    final now = DateTime.now();
+    final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+    setState(() {
+      _logs.add('[$time] $msg');
+    });
   }
 
   File _getKeysFile() {
@@ -100,6 +109,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
         _errorMsg = '';
         _outputPath = '';
         _currentStep = 0;
+        _logs.clear();
       });
     }
   }
@@ -125,6 +135,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
       _isProcessing = true;
       _errorMsg = '';
       _outputPath = '';
+      _logs.clear();
       _currentStep = 1;
     });
 
@@ -135,14 +146,20 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
       String script;
       if (_apiProvider == 'Hybrid') {
+        _addLog('Groq: ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
         final transcript = await GroqService(_groqKeyCtrl.text.trim())
             .transcribeAudio(_videoPath!);
+        _addLog('Groq: အသံဖတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
+
         setState(() => _currentStep = 2);
-        script = await GeminiService(geminiKeys).translateToMyanmarRecap(transcript);
+        script = await GeminiService(geminiKeys)
+            .translateToMyanmarRecap(transcript, onLog: _addLog);
       } else if (_apiProvider == 'Gemini') {
-        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!);
+        script = await GeminiService(geminiKeys)
+            .generateRecapScript(_videoPath!, onLog: _addLog);
         setState(() => _currentStep = 2);
       } else {
+        _addLog('Groq: အသံနားထောင်ပြီး ဘာသာပြန်နေသည်...');
         script = await GroqService(_groqKeyCtrl.text.trim())
             .generateRecapScript(_videoPath!);
         setState(() => _currentStep = 2);
@@ -160,9 +177,11 @@ class _RecapHomePageState extends State<RecapHomePage> {
         pitchHz: _pitch.toInt(),
         audioOutPath: audioPath,
         srtOutPath: srtPath,
+        onLog: _addLog,
       );
 
       setState(() => _currentStep = 4);
+      _addLog('FFmpeg: ဖုန်း CPU ဖြင့် Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်နေသည်...');
       final outPath = await FfmpegService().renderRecapVideo(
         videoPath: _videoPath!,
         audioPath: audioPath,
@@ -171,11 +190,13 @@ class _RecapHomePageState extends State<RecapHomePage> {
         subY: _subY,
       );
 
+      _addLog('ပြီးစီးပါပြီ! ဖိုင်သိမ်းပြီး: $outPath');
       setState(() {
         _outputPath = outPath;
         _currentStep = 5;
       });
     } catch (e) {
+      _addLog('❌ Error: $e');
       setState(() => _errorMsg = e.toString());
     } finally {
       setState(() => _isProcessing = false);
@@ -420,12 +441,32 @@ class _RecapHomePageState extends State<RecapHomePage> {
                       const Text('လုပ်ဆောင်နေသည့် အဆင့်များ', style: TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
                       _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
-                      _buildStepTile(2, '၂။ Gemini (3.8/3.5/3.1) ဖြင့် မြန်မာ Recap ဘာသာပြန်ခြင်း'),
+                      _buildStepTile(2, '၂။ Gemini ဖြင့် မြန်မာတိုက်ရိုက်ဘာသာပြန်ခြင်း'),
                       _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
                       _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း (CPU)'),
                       _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
                     ],
                   ),
+                ),
+              ),
+            ],
+
+            // Live Task Log Box
+            if (_logs.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('📋 Live Log (လုပ်ဆောင်နေပုံ)', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                    const SizedBox(height: 6),
+                    ..._logs.map((l) => Text(l, style: const TextStyle(color: Colors.white, fontSize: 11, fontFamily: 'monospace'))),
+                  ],
                 ),
               ),
             ],
