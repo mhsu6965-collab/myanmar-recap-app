@@ -16,8 +16,9 @@ class RecapHomePage extends StatefulWidget {
 }
 
 class _RecapHomePageState extends State<RecapHomePage> {
-  final _apiKeyCtrl = TextEditingController();
-  String _apiProvider = 'Gemini'; // 'Gemini' or 'Groq'
+  final _groqKeyCtrl = TextEditingController();
+  final _geminiKeyCtrl = TextEditingController();
+  String _apiProvider = 'Hybrid'; // 'Hybrid', 'Gemini', 'Groq'
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -26,7 +27,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
   double _rate = 10;
   double _pitch = 0;
 
-  // Blur 1, Blur 2 နှင့် မြန်မာစာတန်းနေရာ (subY)
   final BlurBox _blur1 = BlurBox(enabled: true, x: 0.05, y: 0.72, w: 0.90, h: 0.12);
   final BlurBox _blur2 = BlurBox(enabled: false, x: 0.05, y: 0.10, w: 0.90, h: 0.10);
   double _subY = 0.85;
@@ -40,7 +40,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
   @override
   void dispose() {
     _videoCtrl?.dispose();
-    _apiKeyCtrl.dispose();
+    _groqKeyCtrl.dispose();
+    _geminiKeyCtrl.dispose();
     super.dispose();
   }
 
@@ -61,8 +62,16 @@ class _RecapHomePageState extends State<RecapHomePage> {
   }
 
   Future<void> _startRecap() async {
-    if (_videoPath == null || _apiKeyCtrl.text.trim().isEmpty) {
-      setState(() => _errorMsg = 'API Key နဲ့ ဗီဒီယိုကို အရင်ရွေးပါ');
+    if (_videoPath == null) {
+      setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
+      return;
+    }
+    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Groq') && _groqKeyCtrl.text.trim().isEmpty) {
+      setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
+      return;
+    }
+    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && _geminiKeyCtrl.text.trim().isEmpty) {
+      setState(() => _errorMsg = 'Gemini API Key ထည့်ပါ');
       return;
     }
 
@@ -78,22 +87,31 @@ class _RecapHomePageState extends State<RecapHomePage> {
       final audioPath = '${tempDir.path}/tts.mp3';
       final srtPath = '${tempDir.path}/subs.srt';
 
-      // Step 1: Gemini သို့မဟုတ် Groq ဖြင့် Script ထုတ်မယ်
       String script;
-      if (_apiProvider == 'Gemini') {
-        script = await GeminiService(_apiKeyCtrl.text.trim())
+      if (_apiProvider == 'Hybrid') {
+        // Step 1: Groq Whisper နဲ့ အသံနားထောင်မယ်
+        final transcript = await GroqService(_groqKeyCtrl.text.trim())
+            .transcribeAudio(_videoPath!);
+        // Step 2: Gemini နဲ့ မြန်မာ Recap ဘာသာပြန်မယ်
+        setState(() => _currentStep = 2);
+        script = await GeminiService(_geminiKeyCtrl.text.trim())
+            .translateToMyanmarRecap(transcript);
+      } else if (_apiProvider == 'Gemini') {
+        script = await GeminiService(_geminiKeyCtrl.text.trim())
             .generateRecapScript(_videoPath!);
+        setState(() => _currentStep = 2);
       } else {
-        script = await GroqService(_apiKeyCtrl.text.trim())
+        script = await GroqService(_groqKeyCtrl.text.trim())
             .generateRecapScript(_videoPath!);
+        setState(() => _currentStep = 2);
       }
 
       setState(() {
         _script = script;
-        _currentStep = 2;
+        _currentStep = 3;
       });
 
-      // Step 2: Edge TTS
+      // Step 3: Edge TTS
       await EdgeTtsService().synthesize(
         text: script,
         voice: _voice,
@@ -103,8 +121,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
         srtOutPath: srtPath,
       );
 
-      // Step 3: FFmpeg Render
-      setState(() => _currentStep = 3);
+      // Step 4: FFmpeg Render (Sync + Blur + Subtitles)
+      setState(() => _currentStep = 4);
       final outPath = await FfmpegService().renderRecapVideo(
         videoPath: _videoPath!,
         audioPath: audioPath,
@@ -115,7 +133,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
       setState(() {
         _outputPath = outPath;
-        _currentStep = 4;
+        _currentStep = 5;
       });
     } catch (e) {
       setState(() => _errorMsg = e.toString());
@@ -203,7 +221,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
   Widget _buildStepTile(int stepNum, String title) {
     Widget icon;
-    if (_currentStep > stepNum || _currentStep == 4) {
+    if (_currentStep > stepNum || _currentStep == 5) {
       icon = const Icon(Icons.check_circle, color: Colors.green);
     } else if (_currentStep == stepNum && _isProcessing) {
       icon = const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5));
@@ -234,24 +252,38 @@ class _RecapHomePageState extends State<RecapHomePage> {
             DropdownButtonFormField<String>(
               value: _apiProvider,
               decoration: const InputDecoration(
-                labelText: 'Script ယူမည့် API ရွေးပါ',
+                labelText: 'Script ယူမည့် စနစ်ရွေးပါ',
                 border: OutlineInputBorder(),
               ),
               items: const [
-                DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini API')),
-                DropdownMenuItem(value: 'Groq', child: Text('Groq API (Whisper + Llama)')),
+                DropdownMenuItem(value: 'Hybrid', child: Text('Hybrid (Groq နားထောင် + Gemini ဘာသာပြန်)')),
+                DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini တစ်ခုတည်း')),
+                DropdownMenuItem(value: 'Groq', child: Text('Groq API တစ်ခုတည်း')),
               ],
               onChanged: (v) => setState(() => _apiProvider = v!),
             ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _apiKeyCtrl,
-              obscureText: true,
-              decoration: InputDecoration(
-                labelText: '$_apiProvider API Key ထည့်ပါ',
-                border: const OutlineInputBorder(),
+            if (_apiProvider == 'Hybrid' || _apiProvider == 'Groq') ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _groqKeyCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Groq API Key (gsk_...)',
+                  border: OutlineInputBorder(),
+                ),
               ),
-            ),
+            ],
+            if (_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _geminiKeyCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Google Gemini API Key (AIza...)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             ElevatedButton.icon(
               onPressed: _isProcessing ? null : _pickVideo,
@@ -344,10 +376,11 @@ class _RecapHomePageState extends State<RecapHomePage> {
                     children: [
                       const Text('လုပ်ဆောင်နေသည့် အဆင့်များ', style: TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
-                      _buildStepTile(1, '၁။ $_apiProvider API ဖြင့် မြန်မာ Script ထုတ်ခြင်း'),
-                      _buildStepTile(2, '၂။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
-                      _buildStepTile(3, '၃။ Blur နှင့် မြန်မာစာတန်း ပေါင်းထုတ်ခြင်း (CPU)'),
-                      _buildStepTile(4, '၄။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
+                      _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
+                      _buildStepTile(2, '၂။ Gemini ဖြင့် မြန်မာ Recap ဘာသာပြန်ခြင်း'),
+                      _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
+                      _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း (CPU)'),
+                      _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
                     ],
                   ),
                 ),
