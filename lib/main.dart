@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -17,8 +18,8 @@ class RecapHomePage extends StatefulWidget {
 
 class _RecapHomePageState extends State<RecapHomePage> {
   final _groqKeyCtrl = TextEditingController();
-  final _geminiKeyCtrl = TextEditingController();
-  String _apiProvider = 'Hybrid'; // 'Hybrid', 'Gemini', 'Groq'
+  final _geminiKeysCtrl = TextEditingController();
+  String _apiProvider = 'Hybrid';
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -38,10 +39,52 @@ class _RecapHomePageState extends State<RecapHomePage> {
   String _script = '';
 
   @override
+  void initState() {
+    super.initState();
+    _loadSavedKeys();
+  }
+
+  File _getKeysFile() {
+    final parentDir = Directory.systemTemp.parent;
+    return File('${parentDir.path}/recap_saved_keys.json');
+  }
+
+  Future<void> _loadSavedKeys() async {
+    try {
+      final file = _getKeysFile();
+      if (await file.exists()) {
+        final data = jsonDecode(await file.readAsString());
+        setState(() {
+          _groqKeyCtrl.text = data['groq'] ?? '';
+          _geminiKeysCtrl.text = data['gemini'] ?? '';
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveKeys() async {
+    try {
+      final file = _getKeysFile();
+      await file.writeAsString(jsonEncode({
+        'groq': _groqKeyCtrl.text.trim(),
+        'gemini': _geminiKeysCtrl.text.trim(),
+      }));
+    } catch (_) {}
+  }
+
+  List<String> _parseGeminiKeys() {
+    return _geminiKeysCtrl.text
+        .split(RegExp(r'[\n,]+'))
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty)
+        .toList();
+  }
+
+  @override
   void dispose() {
     _videoCtrl?.dispose();
     _groqKeyCtrl.dispose();
-    _geminiKeyCtrl.dispose();
+    _geminiKeysCtrl.dispose();
     super.dispose();
   }
 
@@ -62,6 +105,9 @@ class _RecapHomePageState extends State<RecapHomePage> {
   }
 
   Future<void> _startRecap() async {
+    await _saveKeys();
+    final geminiKeys = _parseGeminiKeys();
+
     if (_videoPath == null) {
       setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
       return;
@@ -70,8 +116,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
       setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
       return;
     }
-    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && _geminiKeyCtrl.text.trim().isEmpty) {
-      setState(() => _errorMsg = 'Gemini API Key ထည့်ပါ');
+    if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && geminiKeys.isEmpty) {
+      setState(() => _errorMsg = 'Gemini API Key အနည်းဆုံး ၁ ခု ထည့်ပါ');
       return;
     }
 
@@ -89,16 +135,12 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
       String script;
       if (_apiProvider == 'Hybrid') {
-        // Step 1: Groq Whisper နဲ့ အသံနားထောင်မယ်
         final transcript = await GroqService(_groqKeyCtrl.text.trim())
             .transcribeAudio(_videoPath!);
-        // Step 2: Gemini နဲ့ မြန်မာ Recap ဘာသာပြန်မယ်
         setState(() => _currentStep = 2);
-        script = await GeminiService(_geminiKeyCtrl.text.trim())
-            .translateToMyanmarRecap(transcript);
+        script = await GeminiService(geminiKeys).translateToMyanmarRecap(transcript);
       } else if (_apiProvider == 'Gemini') {
-        script = await GeminiService(_geminiKeyCtrl.text.trim())
-            .generateRecapScript(_videoPath!);
+        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!);
         setState(() => _currentStep = 2);
       } else {
         script = await GroqService(_groqKeyCtrl.text.trim())
@@ -111,7 +153,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
         _currentStep = 3;
       });
 
-      // Step 3: Edge TTS
       await EdgeTtsService().synthesize(
         text: script,
         voice: _voice,
@@ -121,7 +162,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
         srtOutPath: srtPath,
       );
 
-      // Step 4: FFmpeg Render (Sync + Blur + Subtitles)
       setState(() => _currentStep = 4);
       final outPath = await FfmpegService().renderRecapVideo(
         videoPath: _videoPath!,
@@ -266,9 +306,10 @@ class _RecapHomePageState extends State<RecapHomePage> {
               const SizedBox(height: 10),
               TextField(
                 controller: _groqKeyCtrl,
+                onChanged: (_) => _saveKeys(),
                 obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: 'Groq API Key (gsk_...)',
+                  labelText: 'Groq API Key (အလိုအလျောက်သိမ်းမည်)',
                   border: OutlineInputBorder(),
                 ),
               ),
@@ -276,10 +317,12 @@ class _RecapHomePageState extends State<RecapHomePage> {
             if (_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') ...[
               const SizedBox(height: 10),
               TextField(
-                controller: _geminiKeyCtrl,
-                obscureText: true,
+                controller: _geminiKeysCtrl,
+                onChanged: (_) => _saveKeys(),
+                maxLines: 3,
                 decoration: const InputDecoration(
-                  labelText: 'Google Gemini API Key (AIza...)',
+                  labelText: 'Gemini API Keys (၂-၃ ခု တစ်ကြောင်းတစ်ခုစီထည့်ပါ)',
+                  hintText: 'AIzaSy...\nAIzaSy...\nAIzaSy...',
                   border: OutlineInputBorder(),
                 ),
               ),
@@ -377,7 +420,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                       const Text('လုပ်ဆောင်နေသည့် အဆင့်များ', style: TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
                       _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
-                      _buildStepTile(2, '၂။ Gemini ဖြင့် မြန်မာ Recap ဘာသာပြန်ခြင်း'),
+                      _buildStepTile(2, '၂။ Gemini (3.8/3.5/3.1) ဖြင့် မြန်မာ Recap ဘာသာပြန်ခြင်း'),
                       _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
                       _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း (CPU)'),
                       _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
