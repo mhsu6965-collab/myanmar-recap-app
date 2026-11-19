@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:video_player/video_player.dart';
 import 'services/gemini_service.dart';
+import 'services/groq_service.dart';
 import 'services/edge_tts_service.dart';
 import 'services/ffmpeg_service.dart';
 
@@ -17,6 +17,7 @@ class RecapHomePage extends StatefulWidget {
 
 class _RecapHomePageState extends State<RecapHomePage> {
   final _apiKeyCtrl = TextEditingController();
+  String _apiProvider = 'Gemini'; // 'Gemini' or 'Groq'
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -25,11 +26,11 @@ class _RecapHomePageState extends State<RecapHomePage> {
   double _rate = 10;
   double _pitch = 0;
 
-  // Blur 1 & Blur 2 (0.0 မှ 1.0 အတွင်း နေရာ)
+  // Blur 1, Blur 2 နှင့် မြန်မာစာတန်းနေရာ (subY)
   final BlurBox _blur1 = BlurBox(enabled: true, x: 0.05, y: 0.72, w: 0.90, h: 0.12);
   final BlurBox _blur2 = BlurBox(enabled: false, x: 0.05, y: 0.10, w: 0.90, h: 0.10);
+  double _subY = 0.85;
 
-  // Step Progress: 0 = မစသေး, 1 = Script, 2 = TTS, 3 = Render, 4 = ပြီးပြီ
   int _currentStep = 0;
   bool _isProcessing = false;
   String _errorMsg = '';
@@ -73,13 +74,20 @@ class _RecapHomePageState extends State<RecapHomePage> {
     });
 
     try {
-      final tempDir = await getTemporaryDirectory();
+      final tempDir = Directory.systemTemp;
       final audioPath = '${tempDir.path}/tts.mp3';
       final srtPath = '${tempDir.path}/subs.srt';
 
-      // Step 1: Gemini Script
-      final script = await GeminiService(_apiKeyCtrl.text.trim())
-          .generateRecapScript(_videoPath!);
+      // Step 1: Gemini သို့မဟုတ် Groq ဖြင့် Script ထုတ်မယ်
+      String script;
+      if (_apiProvider == 'Gemini') {
+        script = await GeminiService(_apiKeyCtrl.text.trim())
+            .generateRecapScript(_videoPath!);
+      } else {
+        script = await GroqService(_apiKeyCtrl.text.trim())
+            .generateRecapScript(_videoPath!);
+      }
+
       setState(() {
         _script = script;
         _currentStep = 2;
@@ -102,6 +110,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
         audioPath: audioPath,
         srtPath: srtPath,
         blurs: [_blur1, _blur2],
+        subY: _subY,
       );
 
       setState(() {
@@ -137,12 +146,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
           child: Stack(
             children: [
               Center(
-                child: Text(
-                  label,
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
-                ),
+                child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
               ),
-              // ညာဘက်အောက်ထောင့် အကြီး/အသေး ဆွဲချဲ့ရန်
               Positioned(
                 right: 0,
                 bottom: 0,
@@ -162,6 +167,34 @@ class _RecapHomePageState extends State<RecapHomePage> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDraggableSubtitle(double maxW, double maxH) {
+    return Positioned(
+      left: maxW * 0.05,
+      top: (_subY * maxH) - 16,
+      width: maxW * 0.90,
+      height: 32,
+      child: GestureDetector(
+        onVerticalDragUpdate: (details) {
+          setState(() {
+            _subY = (_subY + details.delta.dy / maxH).clamp(0.08, 0.95);
+          });
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.green.withOpacity(0.5),
+            border: Border.all(color: Colors.greenAccent, width: 1.5),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          alignment: Alignment.center,
+          child: const Text(
+            '↕ မြန်မာစာတန်းထိုးနေရာ',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
           ),
         ),
       ),
@@ -198,12 +231,25 @@ class _RecapHomePageState extends State<RecapHomePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            DropdownButtonFormField<String>(
+              value: _apiProvider,
+              decoration: const InputDecoration(
+                labelText: 'Script ယူမည့် API ရွေးပါ',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini API')),
+                DropdownMenuItem(value: 'Groq', child: Text('Groq API (Whisper + Llama)')),
+              ],
+              onChanged: (v) => setState(() => _apiProvider = v!),
+            ),
+            const SizedBox(height: 10),
             TextField(
               controller: _apiKeyCtrl,
               obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'Google Gemini API Key',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                labelText: '$_apiProvider API Key ထည့်ပါ',
+                border: const OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 12),
@@ -213,10 +259,9 @@ class _RecapHomePageState extends State<RecapHomePage> {
               label: Text(_videoPath == null ? 'Gallery မှ ဗီဒီယိုရွေးပါ' : 'ရွေးပြီး: ${_videoPath!.split('/').last}'),
             ),
 
-            // Video Preview + Draggable Blur 1 & Blur 2
             if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
               const SizedBox(height: 14),
-              const Text('Blur အကွက်ကို လက်နဲ့ဆွဲရွှေ့ပါ (ထောင့်စက်ဝိုင်းကိုဆွဲပြီး ချဲ့ပါ)', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const Text('Blur (အပြာ/လိမ္မော်) နဲ့ မြန်မာစာတန်း (အစိမ်း) ကို လက်နဲ့ဆွဲရွှေ့ပါ', style: TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 6),
               Center(
                 child: ConstrainedBox(
@@ -230,6 +275,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                             VideoPlayer(_videoCtrl!),
                             _buildDraggableBlur(_blur1, 'Blur 1', Colors.blue, constraints.maxWidth, constraints.maxHeight),
                             _buildDraggableBlur(_blur2, 'Blur 2', Colors.orange, constraints.maxWidth, constraints.maxHeight),
+                            _buildDraggableSubtitle(constraints.maxWidth, constraints.maxHeight),
                           ],
                         );
                       },
@@ -288,7 +334,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
               child: Text(_isProcessing ? 'လုပ်ဆောင်နေပါသည်...' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်'),
             ),
 
-            // Step-by-Step Progress Card
             if (_currentStep > 0) ...[
               const SizedBox(height: 16),
               Card(
@@ -299,7 +344,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                     children: [
                       const Text('လုပ်ဆောင်နေသည့် အဆင့်များ', style: TextStyle(fontWeight: FontWeight.bold)),
                       const SizedBox(height: 8),
-                      _buildStepTile(1, '၁။ Gemini API ဖြင့် မြန်မာ Script ထုတ်ခြင်း'),
+                      _buildStepTile(1, '၁။ $_apiProvider API ဖြင့် မြန်မာ Script ထုတ်ခြင်း'),
                       _buildStepTile(2, '၂။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
                       _buildStepTile(3, '၃။ Blur နှင့် မြန်မာစာတန်း ပေါင်းထုတ်ခြင်း (CPU)'),
                       _buildStepTile(4, '၄။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
