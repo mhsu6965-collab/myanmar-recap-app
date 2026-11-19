@@ -8,7 +8,7 @@ import 'package:web_socket_channel/io.dart';
 
 class EdgeTtsService {
   static const _trustedToken = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
-  static const _chromiumVersion = '130.0.2849.68';
+  static const _chromiumVersion = '143.0.3650.75';
 
   String _generateSecMsGec() {
     int ticks = (DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000) + 11644473600;
@@ -52,14 +52,17 @@ class EdgeTtsService {
         '&Sec-MS-GEC-Version=1-$_chromiumVersion'
         '&ConnectionId=$requestId';
 
+    final muid = const Uuid().v4().replaceAll('-', '').toUpperCase();
     final channel = IOWebSocketChannel.connect(
       Uri.parse(wsUrl),
       headers: {
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
         'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cookie': 'muid=$muid;',
         'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0',
       },
     );
 
