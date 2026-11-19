@@ -1,16 +1,15 @@
 import 'dart:io';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
 class BlurBox {
   bool enabled;
-  double x; // 0.0 to 1.0
-  double y; // 0.0 to 1.0
-  double w; // 0.0 to 1.0
-  double h; // 0.0 to 1.0
+  double x;
+  double y;
+  double w;
+  double h;
 
   BlurBox({
     required this.enabled,
@@ -31,8 +30,7 @@ class FfmpegService {
   }
 
   Future<String> _prepareFontDir() async {
-    final docDir = await getApplicationDocumentsDirectory();
-    final fontDir = Directory('${docDir.path}/fonts');
+    final fontDir = Directory('${Directory.systemTemp.path}/fonts');
     if (!await fontDir.exists()) await fontDir.create(recursive: true);
 
     final fontFile = File('${fontDir.path}/Pyidaungsu.ttf');
@@ -48,22 +46,22 @@ class FfmpegService {
     required String audioPath,
     required String srtPath,
     required List<BlurBox> blurs,
+    required double subY, // 0.0 (အပေါ်) မှ 1.0 (အောက်)
   }) async {
     final vidDur = await getDuration(videoPath);
     final audDur = await getDuration(audioPath);
     final ptsRatio = (audDur / vidDur).toStringAsFixed(4);
 
     final fontDir = await _prepareFontDir();
-    final outDir = await getApplicationDocumentsDirectory();
-    final outputPath = '${outDir.path}/recap_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final outDir = Directory('/storage/emulated/0/Download');
+    final saveFolder = await outDir.exists() ? outDir.path : Directory.systemTemp.path;
+    final outputPath = '$saveFolder/recap_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    // 1. Scale 720p + Audio/Video Sync
     final buffer = StringBuffer();
     buffer.write("[0:v]scale=720:-2,setpts=$ptsRatio*PTS[v0];");
     String currentLabel = "v0";
     int idx = 1;
 
-    // 2. Blur 1 & Blur 2 ကို နေရာအတိအကျထည့်မယ်
     for (final b in blurs) {
       if (!b.enabled) continue;
       final bx = b.x.clamp(0.0, 0.95).toStringAsFixed(4);
@@ -81,11 +79,13 @@ class FfmpegService {
       idx++;
     }
 
-    // 3. မြန်မာစာတန်းထိုးထည့်မယ်
+    // လက်နဲ့ရွှေ့ထားတဲ့ စာတန်းနေရာ (subY) ကို MarginV အဖြစ်ပြောင်းမယ်
+    final marginV = ((1.0 - subY).clamp(0.05, 0.92) * 288).round();
+
     buffer.write(
       "[$currentLabel]subtitles=$srtPath:fontsdir=$fontDir:"
       "force_style='FontName=Pyidaungsu,FontSize=20,PrimaryColour=&H00FFFFFF,"
-      "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2'[v_out]",
+      "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Alignment=2,MarginV=$marginV'[v_out]",
     );
 
     final cmd = '-y -i "$videoPath" -i "$audioPath" '
