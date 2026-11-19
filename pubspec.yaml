@@ -1,5 +1,5 @@
 name: myanmar_recap_tool
-description: Offline Video Recap Tool with Gemini, Edge TTS & FFmpegKit
+description: Offline Video Recap Tool with Gemini, Groq, Edge TTS & FFmpegKit
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -13,7 +13,6 @@ dependencies:
   video_player: ^2.9.2
   http: ^1.2.1
   web_socket_channel: ^3.0.1
-  path_provider: ^2.1.3
   uuid: ^4.4.0
   ffmpeg_kit_flutter_new: ^4.6.3
 
