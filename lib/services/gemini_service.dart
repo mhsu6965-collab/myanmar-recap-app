@@ -6,23 +6,25 @@ class GeminiService {
   final List<String> apiKeys;
   GeminiService(this.apiKeys);
 
-  // တစ်ခုမရရင် တစ်ခု အလိုအလျောက် လှည့်သုံးမည့် Model စာရင်း
   static const List<String> _models = [
     'gemini-3.8-flash',
     'gemini-3.5-flash',
     'gemini-3.1-flash',
   ];
 
-  // Key များနှင့် Model များကို Rotate လုပ်ပြီး Limit ထိရင် စောင့်ခေါ်ပေးမည့် Function
-  Future<String> _callWithRotation(Map<String, dynamic> Function() bodyBuilder) async {
+  Future<String> _callWithRotation(
+    Map<String, dynamic> Function() bodyBuilder,
+    Function(String)? onLog,
+  ) async {
     String lastError = 'API Key မရှိပါ';
 
-    // အများဆုံး ၃ ကြိမ်အထိ (Limit ထိရင် ၁၀ စက္ကန့်စောင့်ပြီး) ပြန်ကြိုးစားမယ်
     for (int round = 1; round <= 3; round++) {
       bool hitRateLimit = false;
 
-      for (final key in apiKeys) {
+      for (int k = 0; k < apiKeys.length; k++) {
+        final key = apiKeys[k];
         for (final model in _models) {
+          onLog?.call('Gemini: Key #${k + 1} | $model ဖြင့် ဘာသာပြန်နေသည်...');
           final uri = Uri.parse(
             'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
           );
@@ -34,25 +36,28 @@ class GeminiService {
             );
 
             if (res.statusCode == 200) {
+              onLog?.call('Gemini: $model ဖြင့် ဘာသာပြန်ပြီးစီးပါပြီ။');
               final jsonRes = jsonDecode(res.body);
               return jsonRes['candidates'][0]['content']['parts'][0]['text'].toString().trim();
             } else if (res.statusCode == 429 || res.statusCode == 503) {
               hitRateLimit = true;
-              lastError = 'Limit ထိနေပါသည် ($model): ${res.statusCode}';
-              continue; // နောက် Model / Key ပြောင်းမယ်
+              lastError = 'Limit ထိနေသည် ($model)';
+              onLog?.call('Gemini: $model Limit ထိ၍ နောက်တစ်ခုပြောင်းနေသည်...');
+              continue;
             } else {
-              lastError = '($model) Error ${res.statusCode}: ${res.body}';
-              continue; // 404 စသည်ဖြစ်ရင် နောက် Model ပြောင်းမယ်
+              lastError = '($model) Error ${res.statusCode}';
+              onLog?.call('Gemini: $model မရ၍ နောက်တစ်ခုပြောင်းနေသည်...');
+              continue;
             }
           } catch (e) {
-            lastError = '($model) Connection Error: $e';
+            lastError = '($model) Error: $e';
             continue;
           }
         }
       }
 
-      // Key နဲ့ Model အကုန် Limit ထိနေရင် ၁၀ စက္ကန့်စောင့်ပြီး ထပ်ခေါ်မယ်
       if (hitRateLimit && round < 3) {
+        onLog?.call('Gemini: Key အားလုံး Limit ထိနေ၍ ၁၀ စက္ကန့် စောင့်နေသည်...');
         await Future.delayed(const Duration(seconds: 10));
       } else if (!hitRateLimit) {
         break;
@@ -62,29 +67,33 @@ class GeminiService {
     throw Exception('Gemini Model/Key အားလုံး မအောင်မြင်ပါ: $lastError');
   }
 
-  // Hybrid စနစ်အတွက်: Groq ကရလာတဲ့ Transcript ကို Gemini နဲ့ မြန်မာ Recap ဘာသာပြန်မယ်
-  Future<String> translateToMyanmarRecap(String transcript) async {
-    return _callWithRotation(() => {
-          "contents": [
-            {
-              "parts": [
-                {
-                  "text": "အောက်ပါ ဗီဒီယိုစကားပြောစာသားကို ဆွဲဆောင်မှုရှိပြီး သဘာဝကျတဲ့ "
-                      "မြန်မာ Movie Recap ပုံစံနဲ့ အတိုချုံးပြန်ပြောပြပေးပါ။ "
-                      "စာသားသက်သက် (Plain text) ပဲ ထုတ်ပေးပါ။ Markdown သင်္ကေတတွေ လုံးဝမထည့်ပါနဲ့။\n\n$transcript"
-                }
-              ]
-            }
-          ]
-        });
+  // Script အတိုင်း တိုက်ရိုက်ဘာသာပြန်မည် (အတိုမချုံးပါ)
+  Future<String> translateToMyanmarRecap(String transcript, {Function(String)? onLog}) async {
+    return _callWithRotation(
+      () => {
+        "generationConfig": {"temperature": 0.2},
+        "contents": [
+          {
+            "parts": [
+              {
+                "text": "အောက်ပါ Script ကို အတိုမချုံးဘဲ၊ မူရင်းအဓိပ္ပာယ်အတိုင်း "
+                    "သဘာဝကျကျ မြန်မာဘာသာသို့ တိုက်ရိုက်ဘာသာပြန်ပေးပါ။ "
+                    "စာသားသက်သက် (Plain text) ပဲ ထုတ်ပေးပါ။ Markdown သင်္ကေတတွေ မထည့်ပါနဲ့။\n\n$transcript"
+              }
+            ]
+          }
+        ]
+      },
+      onLog,
+    );
   }
 
-  // Gemini တစ်ခုတည်းသုံးပြီး ဗီဒီယိုတိုက်ရိုက်ကြည့်မည့်စနစ်
-  Future<String> generateRecapScript(String videoPath) async {
+  Future<String> generateRecapScript(String videoPath, {Function(String)? onLog}) async {
     final primaryKey = apiKeys.first;
     final file = File(videoPath);
     final bytes = await file.readAsBytes();
 
+    onLog?.call('Gemini: ဗီဒီယိုကို Upload တင်နေသည်...');
     final uploadUri = Uri.parse(
       'https://generativelanguage.googleapis.com/upload/v1beta/files?key=$primaryKey',
     );
@@ -102,6 +111,7 @@ class GeminiService {
     final fileUri = fileData['uri'];
     final fileName = fileData['name'];
 
+    onLog?.call('Gemini: ဗီဒီယို Processing ပြီးအောင် စောင့်နေသည်...');
     while (true) {
       await Future.delayed(const Duration(seconds: 3));
       final stateRes = await http.get(
@@ -112,21 +122,24 @@ class GeminiService {
       if (state == 'FAILED') throw Exception('Gemini Video Processing မအောင်မြင်ပါ');
     }
 
-    return _callWithRotation(() => {
-          "contents": [
-            {
-              "parts": [
-                {
-                  "file_data": {"mime_type": "video/mp4", "file_uri": fileUri}
-                },
-                {
-                  "text": "ဒီဗီဒီယိုထဲက အကြောင်းအရာကို ဆွဲဆောင်မှုရှိတဲ့ မြန်မာ Movie Recap ပုံစံနဲ့ "
-                      "အတိုချုံးပြန်ပြောပြပေးပါ။ စာသားသက်သက် (Plain text) ပဲ ထုတ်ပေးပါ။ "
-                      "Markdown သင်္ကေတတွေ မထည့်ပါနဲ့။"
-                }
-              ]
-            }
-          ]
-        });
+    return _callWithRotation(
+      () => {
+        "generationConfig": {"temperature": 0.2},
+        "contents": [
+          {
+            "parts": [
+              {
+                "file_data": {"mime_type": "video/mp4", "file_uri": fileUri}
+              },
+              {
+                "text": "ဒီဗီဒီယိုထဲက စကားပြောတွေကို မူရင်းအတိုင်း သဘာဝကျကျ "
+                    "မြန်မာဘာသာသို့ တိုက်ရိုက်ဘာသာပြန်ပေးပါ။ စာသားသက်သက် (Plain text) ပဲ ထုတ်ပေးပါ။"
+              }
+            ]
+          }
+        ]
+      },
+      onLog,
+    );
   }
 }
