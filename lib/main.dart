@@ -8,7 +8,38 @@ import 'services/groq_service.dart';
 import 'services/edge_tts_service.dart';
 import 'services/ffmpeg_service.dart';
 
-void main() => runApp(const MaterialApp(home: RecapHomePage(), debugShowCheckedModeBanner: false));
+void main() => runApp(const RecapApp());
+
+class RecapApp extends StatelessWidget {
+  const RecapApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0E1016),
+        cardColor: const Color(0xFF181B24),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF7C4DFF),
+          secondary: Color(0xFF00E5FF),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF11131A),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFF2A2E3D)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFF2A2E3D)),
+          ),
+        ),
+      ),
+      home: const RecapHomePage(),
+    );
+  }
+}
 
 class RecapHomePage extends StatefulWidget {
   const RecapHomePage({super.key});
@@ -48,15 +79,10 @@ class _RecapHomePageState extends State<RecapHomePage> {
   void _addLog(String msg) {
     final now = DateTime.now();
     final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
-    setState(() {
-      _logs.add('[$time] $msg');
-    });
+    setState(() => _logs.add('[$time] $msg'));
   }
 
-  File _getKeysFile() {
-    final parentDir = Directory.systemTemp.parent;
-    return File('${parentDir.path}/recap_saved_keys.json');
-  }
+  File _getKeysFile() => File('${Directory.systemTemp.parent.path}/recap_saved_keys.json');
 
   Future<void> _loadSavedKeys() async {
     try {
@@ -73,8 +99,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
   Future<void> _saveKeys() async {
     try {
-      final file = _getKeysFile();
-      await file.writeAsString(jsonEncode({
+      await _getKeysFile().writeAsString(jsonEncode({
         'groq': _groqKeyCtrl.text.trim(),
         'gemini': _geminiKeysCtrl.text.trim(),
       }));
@@ -146,22 +171,18 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
       String script;
       if (_apiProvider == 'Hybrid') {
-        _addLog('Groq: ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
-        final transcript = await GroqService(_groqKeyCtrl.text.trim())
-            .transcribeAudio(_videoPath!);
+        _addLog('Groq: အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
+        final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
         _addLog('Groq: အသံဖတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
 
         setState(() => _currentStep = 2);
-        script = await GeminiService(geminiKeys)
-            .translateToMyanmarRecap(transcript, onLog: _addLog);
+        script = await GeminiService(geminiKeys).translateToMyanmarRecap(transcript, onLog: _addLog);
       } else if (_apiProvider == 'Gemini') {
-        script = await GeminiService(geminiKeys)
-            .generateRecapScript(_videoPath!, onLog: _addLog);
+        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!, onLog: _addLog);
         setState(() => _currentStep = 2);
       } else {
         _addLog('Groq: အသံနားထောင်ပြီး ဘာသာပြန်နေသည်...');
-        script = await GroqService(_groqKeyCtrl.text.trim())
-            .generateRecapScript(_videoPath!);
+        script = await GroqService(_groqKeyCtrl.text.trim()).generateRecapScript(_videoPath!);
         setState(() => _currentStep = 2);
       }
 
@@ -181,7 +202,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
       );
 
       setState(() => _currentStep = 4);
-      _addLog('FFmpeg: ဖုန်း CPU ဖြင့် Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်နေသည်...');
+      _addLog('FFmpeg: CPU ဖြင့် Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိနေသည်...');
       final outPath = await FfmpegService().renderRecapVideo(
         videoPath: _videoPath!,
         audioPath: audioPath,
@@ -203,6 +224,32 @@ class _RecapHomePageState extends State<RecapHomePage> {
     }
   }
 
+  Widget _sectionCard({required String title, required IconData icon, required Widget child}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF181B24),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF262A38)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: const Color(0xFF00E5FF)),
+              const SizedBox(width: 8),
+              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          child,
+        ],
+      ),
+    );
+  }
+
   Widget _buildDraggableBlur(BlurBox box, String label, Color color, double maxW, double maxH) {
     if (!box.enabled) return const SizedBox.shrink();
     return Positioned(
@@ -211,37 +258,36 @@ class _RecapHomePageState extends State<RecapHomePage> {
       width: box.w * maxW,
       height: box.h * maxH,
       child: GestureDetector(
-        onPanUpdate: (details) {
+        onPanUpdate: (d) {
           setState(() {
-            box.x = (box.x + details.delta.dx / maxW).clamp(0.0, 1.0 - box.w);
-            box.y = (box.y + details.delta.dy / maxH).clamp(0.0, 1.0 - box.h);
+            box.x = (box.x + d.delta.dx / maxW).clamp(0.0, 1.0 - box.w);
+            box.y = (box.y + d.delta.dy / maxH).clamp(0.0, 1.0 - box.h);
           });
         },
         child: Container(
           decoration: BoxDecoration(
-            color: color.withOpacity(0.35),
+            color: color.withOpacity(0.32),
             border: Border.all(color: color, width: 2),
+            borderRadius: BorderRadius.circular(6),
           ),
           child: Stack(
             children: [
-              Center(
-                child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
-              ),
+              Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))),
               Positioned(
                 right: 0,
                 bottom: 0,
                 child: GestureDetector(
-                  onPanUpdate: (details) {
+                  onPanUpdate: (d) {
                     setState(() {
-                      box.w = (box.w + details.delta.dx / maxW).clamp(0.1, 1.0 - box.x);
-                      box.h = (box.h + details.delta.dy / maxH).clamp(0.05, 1.0 - box.y);
+                      box.w = (box.w + d.delta.dx / maxW).clamp(0.1, 1.0 - box.x);
+                      box.h = (box.h + d.delta.dy / maxH).clamp(0.05, 1.0 - box.y);
                     });
                   },
                   child: Container(
                     width: 22,
                     height: 22,
                     decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                    child: const Icon(Icons.open_in_full, size: 14, color: Colors.white),
+                    child: const Icon(Icons.open_in_full, size: 13, color: Colors.white),
                   ),
                 ),
               ),
@@ -259,22 +305,15 @@ class _RecapHomePageState extends State<RecapHomePage> {
       width: maxW * 0.90,
       height: 32,
       child: GestureDetector(
-        onVerticalDragUpdate: (details) {
-          setState(() {
-            _subY = (_subY + details.delta.dy / maxH).clamp(0.08, 0.95);
-          });
-        },
+        onVerticalDragUpdate: (d) => setState(() => _subY = (_subY + d.delta.dy / maxH).clamp(0.08, 0.95)),
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.5),
+            color: Colors.green.withOpacity(0.55),
             border: Border.all(color: Colors.greenAccent, width: 1.5),
-            borderRadius: BorderRadius.circular(4),
+            borderRadius: BorderRadius.circular(6),
           ),
           alignment: Alignment.center,
-          child: const Text(
-            '↕ မြန်မာစာတန်းထိုးနေရာ',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
-          ),
+          child: const Text('↕ မြန်မာစာတန်းထိုးနေရာ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
         ),
       ),
     );
@@ -283,19 +322,28 @@ class _RecapHomePageState extends State<RecapHomePage> {
   Widget _buildStepTile(int stepNum, String title) {
     Widget icon;
     if (_currentStep > stepNum || _currentStep == 5) {
-      icon = const Icon(Icons.check_circle, color: Colors.green);
+      icon = const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20);
     } else if (_currentStep == stepNum && _isProcessing) {
-      icon = const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2.5));
+      icon = const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.2, color: Color(0xFF00E5FF)));
     } else {
-      icon = const Icon(Icons.radio_button_unchecked, color: Colors.grey);
+      icon = const Icon(Icons.radio_button_unchecked, color: Colors.white30, size: 20);
     }
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
           icon,
           const SizedBox(width: 10),
-          Expanded(child: Text(title, style: TextStyle(fontWeight: _currentStep == stepNum ? FontWeight.bold : FontWeight.normal))),
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 13,
+                color: _currentStep >= stepNum ? Colors.white : Colors.white54,
+                fontWeight: _currentStep == stepNum ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -304,189 +352,234 @@ class _RecapHomePageState extends State<RecapHomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Myanmar Recap Tool')),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF141720),
+        elevation: 0,
+        title: const Row(
+          children: [
+            Icon(Icons.auto_awesome, color: Color(0xFF00E5FF)),
+            SizedBox(width: 8),
+            Text('Myanmar Recap Studio', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          ],
+        ),
+      ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            DropdownButtonFormField<String>(
-              value: _apiProvider,
-              decoration: const InputDecoration(
-                labelText: 'Script ယူမည့် စနစ်ရွေးပါ',
-                border: OutlineInputBorder(),
-              ),
-              items: const [
-                DropdownMenuItem(value: 'Hybrid', child: Text('Hybrid (Groq နားထောင် + Gemini ဘာသာပြန်)')),
-                DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini တစ်ခုတည်း')),
-                DropdownMenuItem(value: 'Groq', child: Text('Groq API တစ်ခုတည်း')),
-              ],
-              onChanged: (v) => setState(() => _apiProvider = v!),
-            ),
-            if (_apiProvider == 'Hybrid' || _apiProvider == 'Groq') ...[
-              const SizedBox(height: 10),
-              TextField(
-                controller: _groqKeyCtrl,
-                onChanged: (_) => _saveKeys(),
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Groq API Key (အလိုအလျောက်သိမ်းမည်)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-            if (_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') ...[
-              const SizedBox(height: 10),
-              TextField(
-                controller: _geminiKeysCtrl,
-                onChanged: (_) => _saveKeys(),
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  labelText: 'Gemini API Keys (၂-၃ ခု တစ်ကြောင်းတစ်ခုစီထည့်ပါ)',
-                  hintText: 'AIzaSy...\nAIzaSy...\nAIzaSy...',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-            const SizedBox(height: 12),
-            ElevatedButton.icon(
-              onPressed: _isProcessing ? null : _pickVideo,
-              icon: const Icon(Icons.video_library),
-              label: Text(_videoPath == null ? 'Gallery မှ ဗီဒီယိုရွေးပါ' : 'ရွေးပြီး: ${_videoPath!.split('/').last}'),
-            ),
-
-            if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
-              const SizedBox(height: 14),
-              const Text('Blur (အပြာ/လိမ္မော်) နဲ့ မြန်မာစာတန်း (အစိမ်း) ကို လက်နဲ့ဆွဲရွှေ့ပါ', style: TextStyle(fontSize: 12, color: Colors.grey)),
-              const SizedBox(height: 6),
-              Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 360),
-                  child: AspectRatio(
-                    aspectRatio: _videoCtrl!.value.aspectRatio,
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        return Stack(
-                          children: [
-                            VideoPlayer(_videoCtrl!),
-                            _buildDraggableBlur(_blur1, 'Blur 1', Colors.blue, constraints.maxWidth, constraints.maxHeight),
-                            _buildDraggableBlur(_blur2, 'Blur 2', Colors.orange, constraints.maxWidth, constraints.maxHeight),
-                            _buildDraggableSubtitle(constraints.maxWidth, constraints.maxHeight),
-                          ],
-                        );
-                      },
-                    ),
-                  ),
-                ),
-              ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
+            _sectionCard(
+              title: 'API Settings',
+              icon: Icons.key_rounded,
+              child: Column(
                 children: [
-                  IconButton(
-                    icon: Icon(_videoCtrl!.value.isPlaying ? Icons.pause_circle : Icons.play_circle, size: 36),
-                    onPressed: () {
-                      setState(() {
-                        _videoCtrl!.value.isPlaying ? _videoCtrl!.pause() : _videoCtrl!.play();
-                      });
-                    },
+                  DropdownButtonFormField<String>(
+                    value: _apiProvider,
+                    decoration: const InputDecoration(labelText: 'Script စနစ်ရွေးပါ'),
+                    items: const [
+                      DropdownMenuItem(value: 'Hybrid', child: Text('Hybrid (Groq နားထောင် + Gemini ဘာသာပြန်)')),
+                      DropdownMenuItem(value: 'Groq', child: Text('Groq API တစ်ခုတည်း (အမြန်ဆုံး)')),
+                      DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini တစ်ခုတည်း')),
+                    ],
+                    onChanged: (v) => setState(() => _apiProvider = v!),
                   ),
-                  FilterChip(
-                    label: const Text('Blur 1'),
-                    selected: _blur1.enabled,
-                    selectedColor: Colors.blue.shade100,
-                    onSelected: (v) => setState(() => _blur1.enabled = v),
-                  ),
-                  const SizedBox(width: 8),
-                  FilterChip(
-                    label: const Text('Blur 2'),
-                    selected: _blur2.enabled,
-                    selectedColor: Colors.orange.shade100,
-                    onSelected: (v) => setState(() => _blur2.enabled = v),
-                  ),
+                  if (_apiProvider == 'Hybrid' || _apiProvider == 'Groq') ...[
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _groqKeyCtrl,
+                      obscureText: true,
+                      decoration: const InputDecoration(labelText: 'Groq API Key (gsk_...)'),
+                    ),
+                  ],
+                  if (_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') ...[
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _geminiKeysCtrl,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Gemini API Keys (၂-၃ ခု တစ်ကြောင်းတစ်ခုစီ)',
+                        hintText: 'AIzaSy...\nAIzaSy...',
+                      ),
+                    ),
+                  ],
                 ],
               ),
-            ],
-
-            const Divider(height: 24),
-            DropdownButtonFormField<String>(
-              value: _voice,
-              decoration: const InputDecoration(labelText: 'Edge TTS အသံ'),
-              items: const [
-                DropdownMenuItem(value: 'my-MM-NilarNeural', child: Text('Nilar (အမျိုးသမီး)')),
-                DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
-              ],
-              onChanged: (v) => setState(() => _voice = v!),
             ),
-            const SizedBox(height: 10),
-            Text('Speed (Rate): ${_rate.toInt()}%'),
-            Slider(value: _rate, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _rate = v)),
-            Text('Pitch: ${_pitch.toInt()} Hz'),
-            Slider(value: _pitch, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _pitch = v)),
 
-            const SizedBox(height: 12),
-            ElevatedButton(
-              onPressed: _isProcessing ? null : _startRecap,
-              style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 14)),
-              child: Text(_isProcessing ? 'လုပ်ဆောင်နေပါသည်...' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်'),
+            _sectionCard(
+              title: 'Video & Blur Editor',
+              icon: Icons.movie_edit,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _isProcessing ? null : _pickVideo,
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      side: const BorderSide(color: Color(0xFF7C4DFF)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.video_library, color: Color(0xFF00E5FF)),
+                    label: Text(
+                      _videoPath == null ? 'Gallery မှ ဗီဒီယိုရွေးပါ' : 'ရွေးပြီး: ${_videoPath!.split('/').last}',
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                  ),
+                  if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
+                    const SizedBox(height: 12),
+                    Center(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxHeight: 350),
+                          child: AspectRatio(
+                            aspectRatio: _videoCtrl!.value.aspectRatio,
+                            child: LayoutBuilder(
+                              builder: (context, c) => Stack(
+                                children: [
+                                  VideoPlayer(_videoCtrl!),
+                                  _buildDraggableBlur(_blur1, 'Blur 1', Colors.blueAccent, c.maxWidth, c.maxHeight),
+                                  _buildDraggableBlur(_blur2, 'Blur 2', Colors.orangeAccent, c.maxWidth, c.maxHeight),
+                                  _buildDraggableSubtitle(c.maxWidth, c.maxHeight),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          icon: Icon(_videoCtrl!.value.isPlaying ? Icons.pause_circle : Icons.play_circle, size: 36, color: const Color(0xFF00E5FF)),
+                          onPressed: () => setState(() => _videoCtrl!.value.isPlaying ? _videoCtrl!.pause() : _videoCtrl!.play()),
+                        ),
+                        const SizedBox(width: 8),
+                        FilterChip(
+                          label: const Text('Blur 1'),
+                          selected: _blur1.enabled,
+                          selectedColor: Colors.blueAccent.withOpacity(0.4),
+                          onSelected: (v) => setState(() => _blur1.enabled = v),
+                        ),
+                        const SizedBox(width: 8),
+                        FilterChip(
+                          label: const Text('Blur 2'),
+                          selected: _blur2.enabled,
+                          selectedColor: Colors.orangeAccent.withOpacity(0.4),
+                          onSelected: (v) => setState(() => _blur2.enabled = v),
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              ),
+            ),
+
+            _sectionCard(
+              title: 'Edge TTS Voice',
+              icon: Icons.record_voice_over_rounded,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  DropdownButtonFormField<String>(
+                    value: _voice,
+                    decoration: const InputDecoration(labelText: 'အသံရွေးပါ'),
+                    items: const [
+                      DropdownMenuItem(value: 'my-MM-NilarNeural', child: Text('Nilar (အမျိုးသမီး)')),
+                      DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
+                    ],
+                    onChanged: (v) => setState(() => _voice = v!),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [const Text('Speed (Rate)'), Text('${_rate.toInt()}%', style: const TextStyle(color: Color(0xFF00E5FF)))],
+                  ),
+                  Slider(value: _rate, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _rate = v)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [const Text('Pitch'), Text('${_pitch.toInt()} Hz', style: const TextStyle(color: Color(0xFF00E5FF)))],
+                  ),
+                  Slider(value: _pitch, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _pitch = v)),
+                ],
+              ),
+            ),
+
+            Container(
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(colors: [Color(0xFF7C4DFF), Color(0xFF00B0FF)]),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: ElevatedButton(
+                onPressed: _isProcessing ? null : _startRecap,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.transparent,
+                  shadowColor: Colors.transparent,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                child: Text(
+                  _isProcessing ? 'လုပ်ဆောင်နေပါသည်...' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
+                ),
+              ),
             ),
 
             if (_currentStep > 0) ...[
-              const SizedBox(height: 16),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('လုပ်ဆောင်နေသည့် အဆင့်များ', style: TextStyle(fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 8),
-                      _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
-                      _buildStepTile(2, '၂။ Gemini ဖြင့် မြန်မာတိုက်ရိုက်ဘာသာပြန်ခြင်း'),
-                      _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထိုး ထုတ်ခြင်း'),
-                      _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း (CPU)'),
-                      _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-
-            // Live Task Log Box
-            if (_logs.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.black87,
-                  borderRadius: BorderRadius.circular(8),
-                ),
+              const SizedBox(height: 14),
+              _sectionCard(
+                title: 'လုပ်ဆောင်နေသည့် အဆင့်များ',
+                icon: Icons.checklist_rounded,
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('📋 Live Log (လုပ်ဆောင်နေပုံ)', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12)),
-                    const SizedBox(height: 6),
-                    ..._logs.map((l) => Text(l, style: const TextStyle(color: Colors.white, fontSize: 11, fontFamily: 'monospace'))),
+                    _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
+                    _buildStepTile(2, '၂။ မြန်မာဘာသာသို့ အမြန်တိုက်ရိုက်ဘာသာပြန်ခြင်း'),
+                    _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထုတ်ခြင်း'),
+                    _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း'),
+                    _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
                   ],
                 ),
               ),
             ],
 
-            if (_outputPath.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text('✅ ပြီးပါပြီ! သိမ်းထားတဲ့နေရာ:\n$_outputPath', style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
-            ],
-            if (_errorMsg.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text('❌ Error: $_errorMsg', style: const TextStyle(color: Colors.red)),
-            ],
-            if (_script.isNotEmpty) ...[
-              const SizedBox(height: 12),
+            if (_logs.isNotEmpty) ...[
               Container(
                 padding: const EdgeInsets.all(12),
-                color: Colors.grey.shade200,
-                child: Text(_script),
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('📋 Live Log', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12)),
+                    const SizedBox(height: 6),
+                    ..._logs.map((l) => Text(l, style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace'))),
+                  ],
+                ),
               ),
             ],
+
+            if (_outputPath.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text('✅ ပြီးပါပြီ! သိမ်းထားတဲ့နေရာ:\n$_outputPath', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+              ),
+            if (_errorMsg.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text('❌ Error: $_errorMsg', style: const TextStyle(color: Colors.redAccent)),
+              ),
+            if (_script.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: const Color(0xFF181B24), borderRadius: BorderRadius.circular(12)),
+                child: Text(_script, style: const TextStyle(color: Colors.white70, height: 1.5)),
+              ),
           ],
         ),
       ),
