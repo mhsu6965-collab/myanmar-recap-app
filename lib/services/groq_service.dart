@@ -8,11 +8,11 @@ class GroqService {
   final String apiKey;
   GroqService(this.apiKey);
 
-  Future<String> generateRecapScript(String videoPath) async {
+  // ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Groq Whisper ဖြင့် စာသား (Transcript) ပြန်ဖတ်မယ်
+  Future<String> transcribeAudio(String videoPath) async {
     final tempDir = Directory.systemTemp;
     final audioPath = '${tempDir.path}/groq_audio_${DateTime.now().millisecondsSinceEpoch}.mp3';
 
-    // 1. ဗီဒီယိုကနေ အသံသက်သက် ခွဲထုတ်မယ်
     final session = await FFmpegKit.execute(
       '-y -i "$videoPath" -vn -acodec libmp3lame -q:a 5 "$audioPath"',
     );
@@ -20,7 +20,6 @@ class GroqService {
       throw Exception('ဗီဒီယိုမှ အသံခွဲထုတ်မရပါ');
     }
 
-    // 2. Groq Whisper API နဲ့ အသံကို စာပြန်ပြောင်းမယ်
     final whisperReq = http.MultipartRequest(
       'POST',
       Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions'),
@@ -33,9 +32,13 @@ class GroqService {
     if (whisperRes.statusCode != 200) {
       throw Exception('Groq Whisper မအောင်မြင်ပါ: ${whisperRes.body}');
     }
-    final transcript = jsonDecode(whisperRes.body)['text'].toString();
+    return jsonDecode(whisperRes.body)['text'].toString().trim();
+  }
 
-    // 3. Groq Llama 3.3 နဲ့ မြန်မာ Movie Recap Script ပြန်ရေးမယ်
+  // Groq တစ်ခုတည်းသုံးချင်သူများအတွက်
+  Future<String> generateRecapScript(String videoPath) async {
+    final transcript = await transcribeAudio(videoPath);
+
     final chatRes = await http.post(
       Uri.parse('https://api.groq.com/openai/v1/chat/completions'),
       headers: {
