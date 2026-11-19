@@ -91,7 +91,7 @@ class GeminiService {
 
   // Limit မထိအောင် တစ်ပိုင်းချင်းစီ Key လှည့်ပြီး ဘာသာပြန်မည်
   Future<String> translateToMyanmarRecap(String transcript, {Function(String)? onLog}) async {
-    const int chunkSize = 2000;
+    const int chunkSize = 6000;
     final List<String> chunks = [];
 
     for (int i = 0; i < transcript.length; i += chunkSize) {
