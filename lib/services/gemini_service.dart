@@ -7,31 +7,39 @@ class GeminiService {
   final List<String> apiKeys;
   GeminiService(this.apiKeys);
 
+  // လှည့်သုံးမည့် Model စာရင်း
   static const List<String> _models = [
     'gemini-3.8-flash',
     'gemini-3.5-flash',
     'gemini-3.1-flash',
+    'gemini-2.5-flash-lite',
   ];
 
-  // Key နှင့် Model Rotate + 25s Timeout (လုံးဝမဟန်းအောင်)
-  Future<String> _callSingle(
+  // 404 မရှိတဲ့ Model တွေကို မှတ်ထားပြီး နောက်တစ်ခါ မခေါ်တော့ဘူး
+  final Set<String> _deadModels = {};
+
+  Future<String> _callWithWaitAndRotate(
     Map<String, dynamic> body,
-    int keyOffset,
+    int startKeyIndex,
     Function(String)? onLog,
   ) async {
-    String lastError = 'API Key မရှိပါ';
+    int round = 1;
 
-    for (int round = 1; round <= 2; round++) {
+    while (round <= 10) {
       bool hitRateLimit = false;
+      String lastError = '';
 
       for (int i = 0; i < apiKeys.length; i++) {
-        final kIndex = (i + keyOffset) % apiKeys.length;
-        final key = apiKeys[kIndex];
+        final kIdx = (i + startKeyIndex) % apiKeys.length;
+        final key = apiKeys[kIdx];
 
         for (final model in _models) {
+          if (_deadModels.contains(model)) continue;
+
           final uri = Uri.parse(
             'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
           );
+
           try {
             final res = await http
                 .post(
@@ -39,21 +47,27 @@ class GeminiService {
                   headers: {'Content-Type': 'application/json'},
                   body: jsonEncode(body),
                 )
-                .timeout(const Duration(seconds: 25));
+                .timeout(const Duration(seconds: 30));
 
             if (res.statusCode == 200) {
               final jsonRes = jsonDecode(res.body);
               return jsonRes['candidates'][0]['content']['parts'][0]['text'].toString().trim();
+            } else if (res.statusCode == 404) {
+              // 404 ဖြစ်တဲ့ Model ကို ဖယ်ထားမယ် (Error မပြဘဲ နောက်တစ်ခုကူးမယ်)
+              _deadModels.add(model);
+              continue;
             } else if (res.statusCode == 429 || res.statusCode == 503) {
               hitRateLimit = true;
               lastError = 'Limit ($model)';
+              onLog?.call('Gemini: Key #${kIdx + 1} ($model) Limit ထိ၍ နောက်တစ်ခုပြောင်းနေသည်...');
               continue;
             } else {
               lastError = '($model) Error ${res.statusCode}';
               continue;
             }
           } on TimeoutException {
-            lastError = '($model) Timeout 25s';
+            hitRateLimit = true;
+            lastError = '($model) Timeout';
             continue;
           } catch (e) {
             lastError = '($model) $e';
@@ -62,20 +76,22 @@ class GeminiService {
         }
       }
 
-      if (hitRateLimit && round < 2) {
-        onLog?.call('Gemini: Limit ထိနေ၍ ၅ စက္ကန့် စောင့်နေသည်...');
-        await Future.delayed(const Duration(seconds: 5));
-      } else if (!hitRateLimit) {
-        break;
+      // Limit ထိနေရင် Error မတက်ဘဲ ၁၅ စက္ကန့် စောင့်ပြီး ပြန်ခေါ်မယ်
+      if (hitRateLimit) {
+        onLog?.call('Gemini: Key/Model အားလုံး Limit ထိနေ၍ ၁၅ စက္ကန့် စောင့်ပြီး ပြန်ခေါ်ပါမည် (အကြိမ် $round/10)...');
+        await Future.delayed(const Duration(seconds: 15));
+        round++;
+      } else {
+        throw Exception('Gemini ဘာသာပြန်မရပါ: $lastError');
       }
     }
 
-    throw Exception('Gemini ဘာသာပြန်မရပါ: $lastError');
+    throw Exception('Gemini ၁၀ ကြိမ် စောင့်ခေါ်သော်လည်း Limit မပွင့်သေးပါ။ ခဏနေမှ ထပ်စမ်းပါ။');
   }
 
-  // စာရှည်နေရင် အပိုင်းခွဲပြီး ပြိုင်တူ (Parallel) အမြန်ဆုံး ဘာသာပြန်မည်
+  // Limit မထိအောင် တစ်ပိုင်းချင်းစီ Key လှည့်ပြီး ဘာသာပြန်မည်
   Future<String> translateToMyanmarRecap(String transcript, {Function(String)? onLog}) async {
-    const int chunkSize = 1200;
+    const int chunkSize = 2000;
     final List<String> chunks = [];
 
     for (int i = 0; i < transcript.length; i += chunkSize) {
@@ -83,11 +99,9 @@ class GeminiService {
       chunks.add(transcript.substring(i, end));
     }
 
-    onLog?.call('Gemini: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး ပြိုင်တူ အမြန်ဘာသာပြန်နေသည်...');
-
-    // အပိုင်းအားလုံးကို တစ်ပြိုင်နက်တည်း (Parallel) ဘာသာပြန်မယ်
-    final futures = <Future<String>>[];
+    final List<String> results = [];
     for (int i = 0; i < chunks.length; i++) {
+      onLog?.call('Gemini: အပိုင်း (${i + 1}/${chunks.length}) ဘာသာပြန်နေသည်...');
       final body = {
         "generationConfig": {"temperature": 0.1},
         "contents": [
@@ -101,11 +115,17 @@ class GeminiService {
           }
         ]
       };
-      futures.add(_callSingle(body, i, onLog));
+
+      final translated = await _callWithWaitAndRotate(body, i, onLog);
+      results.add(translated);
+
+      // နောက်တစ်ပိုင်းမခေါ်ခင် Limit မထိအောင် ၂ စက္ကန့် ခြားပေးမယ်
+      if (i + 1 < chunks.length) {
+        await Future.delayed(const Duration(seconds: 2));
+      }
     }
 
-    final results = await Future.wait(futures);
-    onLog?.call('Gemini: ${chunks.length} ပိုင်းလုံး အမြန်ဘာသာပြန် ပြီးစီးပါပြီ။');
+    onLog?.call('Gemini: အပိုင်းအားလုံး ဘာသာပြန် ပြီးစီးပါပြီ။');
     return results.join('\n');
   }
 
@@ -143,7 +163,7 @@ class GeminiService {
       if (state == 'FAILED') throw Exception('Gemini Video Processing မအောင်မြင်ပါ');
     }
 
-    return _callSingle(
+    return _callWithWaitAndRotate(
       {
         "generationConfig": {"temperature": 0.1},
         "contents": [
