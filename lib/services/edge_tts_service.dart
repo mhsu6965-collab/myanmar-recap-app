@@ -10,7 +10,6 @@ class EdgeTtsService {
   static const _trustedToken = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
   static const _chromiumVersion = '130.0.2849.68';
 
-  // Microsoft Edge 403 မတက်အောင် Sec-MS-GEC Token ထုတ်ပေးမည့် Function
   String _generateSecMsGec() {
     int ticks = (DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000) + 11644473600;
     ticks -= ticks % 300;
@@ -19,20 +18,32 @@ class EdgeTtsService {
     return sha256.convert(utf8.encode(strToHash)).toString().toUpperCase();
   }
 
-  Future<void> synthesize({
+  List<String> _splitText(String text, int maxLen) {
+    final List<String> chunks = [];
+    String remaining = text.trim();
+    while (remaining.isNotEmpty) {
+      if (remaining.length <= maxLen) {
+        chunks.add(remaining);
+        break;
+      }
+      int splitAt = remaining.lastIndexOf('။', maxLen);
+      if (splitAt == -1) splitAt = remaining.lastIndexOf('\n', maxLen);
+      if (splitAt == -1) splitAt = remaining.lastIndexOf(' ', maxLen);
+      if (splitAt <= 0) splitAt = maxLen;
+      chunks.add(remaining.substring(0, splitAt + 1).trim());
+      remaining = remaining.substring(splitAt + 1).trim();
+    }
+    return chunks.where((c) => c.isNotEmpty).toList();
+  }
+
+  Future> _synthesizeChunk({
     required String text,
     required String voice,
-    required int ratePercent,
-    required int pitchHz,
-    required String audioOutPath,
-    required String srtOutPath,
-    Function(String)? onLog,
+    required String rateStr,
+    required String pitchStr,
   }) async {
-    onLog?.call('Edge TTS: Security Token ထုတ်ပြီး Microsoft Server ချိတ်နေသည်...');
     final requestId = const Uuid().v4().replaceAll('-', '');
     final secMsGec = _generateSecMsGec();
-    final rateStr = '${ratePercent >= 0 ? '+' : ''}$ratePercent%';
-    final pitchStr = '${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz';
 
     final wsUrl =
         'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1'
@@ -52,8 +63,10 @@ class EdgeTtsService {
       },
     );
 
+    await channel.ready;
+
     final audioBytes = BytesBuilder();
-    final wordTimings = [];
+    final wordTimings = >[];
     final completer = Completer<void>();
 
     channel.stream.listen((message) {
@@ -67,7 +80,7 @@ class EdgeTtsService {
             final meta = jsonDecode(message.substring(jsonStart));
             for (final item in meta['Metadata'] ?? []) {
               if (item['Type'] == 'WordBoundary') {
-                wordTimings.add(item['Data']);
+                wordTimings.add(Map<String, dynamic>.from(item['Data']));
               }
             }
           }
@@ -82,6 +95,8 @@ class EdgeTtsService {
       }
     }, onError: (e) {
       if (!completer.isCompleted) completer.completeError(e);
+    }, onDone: () {
+      if (!completer.isCompleted) completer.complete();
     });
 
     final configMsg = 'Content-Type:application/json; charset=utf-8\r\n'
@@ -91,7 +106,6 @@ class EdgeTtsService {
         '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
     channel.sink.add(configMsg);
 
-    onLog?.call('Edge TTS: $voice (Speed $rateStr, Pitch $pitchStr) ဖြင့် အသံထုတ်နေသည်...');
     final escapedText = text
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
@@ -106,17 +120,72 @@ class EdgeTtsService {
         'Path:ssml\r\n\r\n$ssml';
     channel.sink.add(ssmlMsg);
 
-    await completer.future;
+    await completer.future.timeout(const Duration(seconds: 40));
+    return {'audio': audioBytes.toBytes(), 'timings': wordTimings};
+  }
 
-    await File(audioOutPath).writeAsBytes(audioBytes.toBytes());
+  Future<void> synthesize({
+    required String text,
+    required String voice,
+    required int ratePercent,
+    required int pitchHz,
+    required String audioOutPath,
+    required String srtOutPath,
+    Function(String)? onLog,
+  }) async {
+    final rateStr = '${ratePercent >= 0 ? '+' : ''}$ratePercent%';
+    final pitchStr = '${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz';
+    final chunks = _splitText(text, 800);
+
+    onLog?.call('Edge TTS: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး အသံထုတ်နေသည်...');
+
+    final allAudio = BytesBuilder();
+    final allTimings = >[];
+    int timeOffsetTicks = 0;
+
+    for (int i = 0; i < chunks.length; i++) {
+      onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${chunks.length}) ထုတ်နေသည်...');
+      Map<String, dynamic>? result;
+
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        try {
+          result = await _synthesizeChunk(
+            text: chunks[i],
+            voice: voice,
+            rateStr: rateStr,
+            pitchStr: pitchStr,
+          );
+          break;
+        } catch (e) {
+          if (attempt == 3) rethrow;
+          onLog?.call('Edge TTS: လိုင်းပြတ်၍ ၂ စက္ကန့်စောင့်ပြီး ပြန်ချိတ်နေသည် ($attempt/3)...');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+
+      allAudio.add(result!['audio'] as Uint8List);
+      final chunkTimings = result['timings'] as List>;
+      int lastEnd = 0;
+      for (final w in chunkTimings) {
+        final offset = (w['Offset'] as int) + timeOffsetTicks;
+        final dur = w['Duration'] as int;
+        allTimings.add({'Offset': offset, 'Duration': dur, 'text': w['text']});
+        if ((w['Offset'] as int) + dur > lastEnd) {
+          lastEnd = (w['Offset'] as int) + dur;
+        }
+      }
+      timeOffsetTicks += lastEnd + 2000000; // အပိုင်းကြား 0.2s ခြားမယ်
+    }
+
+    await File(audioOutPath).writeAsBytes(allAudio.toBytes());
     onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် SRT စာတန်းထိုးဖိုင် ပြီးစီးပါပြီ။');
 
     final srtBuffer = StringBuffer();
     int subIndex = 1;
-    for (int i = 0; i < wordTimings.length; i += 8) {
-      final chunk = wordTimings.sublist(
+    for (int i = 0; i < allTimings.length; i += 8) {
+      final chunk = allTimings.sublist(
         i,
-        (i + 8 > wordTimings.length) ? wordTimings.length : i + 8,
+        (i + 8 > allTimings.length) ? allTimings.length : i + 8,
       );
       final startMs = (chunk.first['Offset'] as int) ~/ 10000;
       final endMs = ((chunk.last['Offset'] as int) + (chunk.last['Duration'] as int)) ~/ 10000;
