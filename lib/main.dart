@@ -70,7 +70,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
   int _selectedColorIdx = 0;
 
   // စာတန်းအရောင် ၅ ရောင် (ASS Format: &H00BBGGRR)
-  static const List> _subColors = [
+  static const _subColors = [
     {'name': 'အဖြူ', 'color': Colors.white, 'ass': '&H00FFFFFF'},
     {'name': 'အဝါ', 'color': Color(0xFFFFEB3B), 'ass': '&H003BEBFF'},
     {'name': 'အပြာနု', 'color': Color(0xFF00E5FF), 'ass': '&H00FFE500'},
