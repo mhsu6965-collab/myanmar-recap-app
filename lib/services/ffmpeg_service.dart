@@ -90,12 +90,13 @@ class FfmpegService {
     final srtContent = await File(srtPath).readAsString(encoding: utf8);
     final assPath = '${Directory.systemTemp.path}/subs_styled.ass';
 
-    final isPortrait = outH >= outW;
-    final baseFontSize = isPortrait ? (outW * 0.044) : (outH * 0.050);
-    final fontSize = (baseFontSize * subScale).round().clamp(16, 140);
-    final marginLR = (outW * 0.06).round();
-    final marginV = ((1.0 - subY).clamp(0.04, 0.90) * outH).round();
-    final outline = (outW * 0.0035 * subScale).round().clamp(2, 6);
+    final baseFontSize = outH * 0.052;
+    final fontSize = (baseFontSize * subScale).round().clamp(20, 180);
+    final outline = (fontSize * 0.07).round().clamp(2, 8);
+    final marginLR = (outW * 0.05).round();
+
+    final posX = outW ~/ 2;
+    final posY = (subY.clamp(0.05, 0.95) * outH).round();
 
     final ass = StringBuffer();
     ass.writeln('[Script Info]');
@@ -107,7 +108,7 @@ class FfmpegService {
     ass.writeln();
     ass.writeln('[V4+ Styles]');
     ass.writeln('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding');
-    ass.writeln('Style: Default,Pyidaungsu,$fontSize,$subColorAss,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,2,$marginLR,$marginLR,$marginV,1');
+    ass.writeln('Style: Default,Pyidaungsu,$fontSize,$subColorAss,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,5,$marginLR,$marginLR,0,1');
     ass.writeln();
     ass.writeln('[Events]');
     ass.writeln('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text');
@@ -123,7 +124,7 @@ class FfmpegService {
       final endMs = _parseSrtTimeMs(times[1]);
       final text = lines.sublist(2).join(r'\N').trim();
       if (text.isEmpty) continue;
-      ass.writeln('Dialogue: 0,${_formatAssTime(startMs)},${_formatAssTime(endMs)},Default,,0,0,0,,$text');
+      ass.writeln('Dialogue: 0,${_formatAssTime(startMs)},${_formatAssTime(endMs)},Default,,0,0,0,,{\\an5\\pos($posX,$posY)}$text');
     }
 
     await File(assPath).writeAsString(ass.toString(), encoding: utf8);
@@ -139,6 +140,7 @@ class FfmpegService {
     double subScale = 1.0,
     String subColorAss = '&H00FFFFFF',
     String resolution = '720p',
+    List? syncSegments,
     Function(String)? onLog,
   }) async {
     final vidInfo = await getVideoInfo(videoPath);
@@ -158,14 +160,6 @@ class FfmpegService {
       outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
     }
 
-    // အသံကို မူရင်းအတိုင်း (1.0x) ထားပြီး ဗီဒီယိုရုပ်ကို အသံအချိန်အတိအကျနဲ့ ကိုက်အောင် မြန်/နှေး ချိန်မည်
-    final double ptsRatio = audDur / vidDur;
-    final double videoSpeed = vidDur / audDur;
-
-    onLog?.call(
-      'FFmpeg ($resolution): ${outW}x$outH | ဗီဒီယိုအမြန်နှုန်း ${videoSpeed.toStringAsFixed(2)}x (မူရင်း ${vidDur.toStringAsFixed(1)}s → အသံ ${audDur.toStringAsFixed(1)}s)',
-    );
-
     final fontDir = await _prepareFontDir();
     final assPath = await _convertSrtToAss(
       srtPath: srtPath,
@@ -180,12 +174,43 @@ class FfmpegService {
     final saveFolder = await outDir.exists() ? outDir.path : Directory.systemTemp.path;
     final outputPath = '$saveFolder/recap_${resolution}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    // setpts ကို fps=30 ရှေ့ထားမှ Frame Rate မလွဲဘဲ ရုပ်နဲ့အသံ အတိအကျ ကိုက်မည်
     final buffer = StringBuffer();
-    buffer.write('[0:v]scale=$outW:$outH,setpts=${ptsRatio.toStringAsFixed(6)}*PTS,fps=30[v0];');
+
+    // အပိုင်းလိုက် Sync Data ပါလာရင် အခန်းတိုင်းကို TTS အသံအချိန်အတိုင်း ရုပ်မြန်/နှေး ချိန်ပြီး ပြန်ဆက်မည်
+    if (syncSegments != null && syncSegments.isNotEmpty) {
+      final int n = syncSegments.length;
+      onLog?.call('FFmpeg ($resolution): အပိုင်း $n ခုလုံးကို TTS အသံအတိုင်း အပိုင်းလိုက် ရုပ်မြန်/နှေး ချိန်ညှိနေသည်...');
+
+      final splitLabels = List.generate(n, (i) => '[in$i]').join();
+      buffer.writeln('[0:v]split=$n$splitLabels;');
+
+      final concatInputs = StringBuffer();
+      for (int i = 0; i < n; i++) {
+        final double rawStart = (syncSegments[i]['vStart'] as num).toDouble();
+        final double vStart = (i == 0) ? 0.0 : rawStart.clamp(0.0, vidDur - 0.1);
+        final double vEnd = (i == n - 1)
+            ? vidDur
+            : (syncSegments[i + 1]['vStart'] as num).toDouble().clamp(vStart + 0.1, vidDur);
+        final double segVidDur = (vEnd - vStart) > 0.1 ? (vEnd - vStart) : 0.1;
+        final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
+        final double ratio = (segAudDur / segVidDur).clamp(0.25, 4.0);
+
+        buffer.writeln(
+          '[in$i]trim=start=${vStart.toStringAsFixed(3)}:end=${vEnd.toStringAsFixed(3)},'
+          'setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)}[seg$i];',
+        );
+        concatInputs.write('[seg$i]');
+      }
+
+      buffer.writeln('${concatInputs.toString()}concat=n=$n:v=1:a=0,scale=$outW:$outH,fps=30[v0];');
+    } else {
+      final double ptsRatio = audDur / vidDur;
+      onLog?.call('FFmpeg ($resolution): ${outW}x$outH | မူရင်း ${vidDur.toStringAsFixed(1)}s → အသံ ${audDur.toStringAsFixed(1)}s');
+      buffer.writeln('[0:v]scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsRatio.toStringAsFixed(6)},fps=30[v0];');
+    }
+
     String currentLabel = 'v0';
     int idx = 1;
-
     for (final b in blurs) {
       if (!b.enabled) continue;
       final bx = b.x.clamp(0.0, 0.95).toStringAsFixed(4);
@@ -194,7 +219,7 @@ class FfmpegService {
       final bh = b.h.clamp(0.05, 1.0 - b.y).toStringAsFixed(4);
 
       final nextLabel = 'v$idx';
-      buffer.write(
+      buffer.writeln(
         '[$currentLabel]split[m$idx][b$idx];'
         '[b$idx]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl$idx];'
         '[m$idx][bl$idx]overlay=W*$bx:H*$by[$nextLabel];',
@@ -203,15 +228,19 @@ class FfmpegService {
       idx++;
     }
 
-    buffer.write('[$currentLabel]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
+    buffer.writeln('[$currentLabel]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
     buffer.write('[1:a]aresample=async=1:first_pts=0[a_out]');
+
+    // Filter ရှည်ရင် Command Error မတက်အောင် ဖိုင်ထဲရေးပြီး -filter_complex_script နဲ့ ခေါ်မည်
+    final filterScriptPath = '${Directory.systemTemp.path}/ffmpeg_filter.txt';
+    await File(filterScriptPath).writeAsString(buffer.toString(), encoding: utf8);
 
     final presetArgs = resolution == '1080p'
         ? '-preset veryfast -crf 23 -threads 4'
         : '-preset ultrafast -crf 26 -threads 2';
 
     final cmd = '-y -i "$videoPath" -i "$audioPath" '
-        '-filter_complex "${buffer.toString()}" '
+        '-filter_complex_script "$filterScriptPath" '
         '-map "[v_out]" -map "[a_out]" '
         '-c:v libx264 $presetArgs -pix_fmt yuv420p '
         '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
