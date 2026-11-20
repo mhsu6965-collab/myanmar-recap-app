@@ -37,7 +37,6 @@ class EdgeTtsService {
     return chunks.where((c) => c.isNotEmpty).toList();
   }
 
-  // စာတန်းကို အများဆုံး ၂ ကြောင်းဖြစ်အောင် ခွဲပေးမည်
   String _formatTwoLines(String text) {
     final clean = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (clean.length <= 24) return clean;
@@ -154,75 +153,7 @@ class EdgeTtsService {
     return fallbackMs;
   }
 
-  Future<void> synthesize({
-    required String text,
-    required String voice,
-    required int ratePercent,
-    required int pitchHz,
-    required String audioOutPath,
-    required String srtOutPath,
-    Function(String)? onLog,
-  }) async {
-    final rateStr = '${ratePercent >= 0 ? '+' : ''}$ratePercent%';
-    final pitchStr = '${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz';
-    final chunks = _splitText(text, 800);
-
-    onLog?.call('Edge TTS: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး အသံထုတ်နေသည်...');
-
-    final tempDir = Directory.systemTemp;
-    final allAudio = BytesBuilder();
-    final allTimings = [];
-    int currentOffsetMs = 0;
-
-    for (int i = 0; i < chunks.length; i++) {
-      onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${chunks.length}) ထုတ်နေသည်...');
-      Map? result;
-
-      for (int attempt = 1; attempt <= 3; attempt++) {
-        try {
-          result = await _synthesizeChunk(
-            text: chunks[i],
-            voice: voice,
-            rateStr: rateStr,
-            pitchStr: pitchStr,
-          );
-          break;
-        } catch (e) {
-          if (attempt == 3) rethrow;
-          onLog?.call('Edge TTS: လိုင်းပြတ်၍ ၂ စက္ကန့်စောင့်ပြီး ပြန်ချိတ်နေသည် ($attempt/3)...');
-          await Future.delayed(const Duration(seconds: 2));
-        }
-      }
-
-      final Uint8List chunkBytes = result!['audio'] as Uint8List;
-      allAudio.add(chunkBytes);
-
-      // အပိုင်းတစ်ခုချင်းစီ၏ အသံကြာချိန်အတိအကျကို FFprobe ဖြင့်တိုင်းပြီး Sync ချိန်မည်
-      final chunkFile = File('${tempDir.path}/tts_chunk_$i.mp3');
-      await chunkFile.writeAsBytes(chunkBytes);
-
-      final List chunkTimings = result['timings'] as List;
-      int lastEndMs = 0;
-      for (final w in chunkTimings) {
-        final startMs = ((w['Offset'] as int) ~/ 10000) + currentOffsetMs;
-        final durMs = (w['Duration'] as int) ~/ 10000;
-        allTimings.add({
-          'startMs': startMs,
-          'endMs': startMs + durMs,
-          'text': w['text']['Text'].toString(),
-        });
-        final relEnd = ((w['Offset'] as int) + (w['Duration'] as int)) ~/ 10000;
-        if (relEnd > lastEndMs) lastEndMs = relEnd;
-      }
-
-      final exactMs = await _getExactAudioMs(chunkFile.path, lastEndMs + 150);
-      currentOffsetMs += exactMs;
-    }
-
-    await File(audioOutPath).writeAsBytes(allAudio.toBytes());
-    onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် ၂ ကြောင်းစာတန်းထိုး ပြီးစီးပါပြီ။');
-
-    // စာလုံးရေ ၄၄ လုံးဝန်းကျင်စီ ဖြတ်ပြီး အများဆုံး ၂ ကြောင်းပဲ ထွက်အောင် SRT ရေးမည်
+  void _writeTwoLineSrt(List allTimings, String srtOutPath) {
     final srtBuffer = StringBuffer();
     int subIndex = 1;
     int i = 0;
@@ -252,7 +183,152 @@ class EdgeTtsService {
       srtBuffer.writeln();
     }
 
-    await File(srtOutPath).writeAsString(srtBuffer.toString(), encoding: utf8);
+    File(srtOutPath).writeAsStringSync(srtBuffer.toString(), encoding: utf8);
+  }
+
+  // [0.0-14.5] အချိန်ပါတဲ့ Script ဆိုရင် အပိုင်းလိုက် TTS ထုတ်ပြီး Sync Data ပြန်ပေးမည်
+  Future<List> synthesizeAuto({
+    required String text,
+    required String voice,
+    required int ratePercent,
+    required int pitchHz,
+    required String audioOutPath,
+    required String srtOutPath,
+    Function(String)? onLog,
+  }) async {
+    final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
+    final parsed = [];
+    for (final line in text.split(RegExp(r'\r?\n'))) {
+      final m = regex.firstMatch(line.trim());
+      if (m != null) {
+        parsed.add({
+          'vStart': double.parse(m.group(1)!),
+          'vEnd': double.parse(m.group(2)!),
+          'text': m.group(3)!.trim(),
+        });
+      }
+    }
+
+    final rateStr = '${ratePercent >= 0 ? '+' : ''}$ratePercent%';
+    final pitchStr = '${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz';
+    final tempDir = Directory.systemTemp;
+    final allAudio = BytesBuilder();
+    final allTimings = [];
+    final syncSegments = [];
+    int currentOffsetMs = 0;
+
+    if (parsed.isNotEmpty) {
+      onLog?.call('Edge TTS (Sync Mode): အပိုင်း ${parsed.length} ခုကို အပိုင်းလိုက် အသံထုတ်နေသည်...');
+
+      for (int i = 0; i < parsed.length; i++) {
+        onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${parsed.length}) ထုတ်နေသည်...');
+        final segText = parsed[i]['text'] as String;
+        Map? result;
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+          try {
+            result = await _synthesizeChunk(
+              text: segText,
+              voice: voice,
+              rateStr: rateStr,
+              pitchStr: pitchStr,
+            );
+            break;
+          } catch (e) {
+            if (attempt == 3) rethrow;
+            onLog?.call('Edge TTS: လိုင်းပြတ်၍ ပြန်ချိတ်နေသည် ($attempt/3)...');
+            await Future.delayed(const Duration(seconds: 2));
+          }
+        }
+
+        final Uint8List chunkBytes = result!['audio'] as Uint8List;
+        allAudio.add(chunkBytes);
+
+        final chunkFile = File('${tempDir.path}/tts_sync_$i.mp3');
+        await chunkFile.writeAsBytes(chunkBytes);
+
+        final List chunkTimings = result['timings'] as List;
+        int lastEndMs = 0;
+        for (final w in chunkTimings) {
+          final startMs = ((w['Offset'] as int) ~/ 10000) + currentOffsetMs;
+          final durMs = (w['Duration'] as int) ~/ 10000;
+          allTimings.add({
+            'startMs': startMs,
+            'endMs': startMs + durMs,
+            'text': w['text']['Text'].toString(),
+          });
+          final relEnd = ((w['Offset'] as int) + (w['Duration'] as int)) ~/ 10000;
+          if (relEnd > lastEndMs) lastEndMs = relEnd;
+        }
+
+        final exactMs = await _getExactAudioMs(chunkFile.path, lastEndMs + 150);
+        currentOffsetMs += exactMs;
+
+        syncSegments.add({
+          'vStart': parsed[i]['vStart'],
+          'vEnd': parsed[i]['vEnd'],
+          'audDur': exactMs / 1000.0,
+        });
+      }
+
+      await File(audioOutPath).writeAsBytes(allAudio.toBytes());
+      _writeTwoLineSrt(allTimings, srtOutPath);
+      onLog?.call('Edge TTS: အပိုင်း ${parsed.length} ခုလုံး အသံနှင့် စာတန်းထိုး ပြီးစီးပါပြီ။');
+      return syncSegments;
+    }
+
+    // အချိန်မပါတဲ့ ရိုးရိုးစာသားဆိုရင် ပုံမှန်အတိုင်း ထုတ်ပေးမည်
+    final chunks = _splitText(text, 800);
+    onLog?.call('Edge TTS: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး အသံထုတ်နေသည်...');
+
+    for (int i = 0; i < chunks.length; i++) {
+      onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${chunks.length}) ထုတ်နေသည်...');
+      Map? result;
+
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        try {
+          result = await _synthesizeChunk(
+            text: chunks[i],
+            voice: voice,
+            rateStr: rateStr,
+            pitchStr: pitchStr,
+          );
+          break;
+        } catch (e) {
+          if (attempt == 3) rethrow;
+          onLog?.call('Edge TTS: လိုင်းပြတ်၍ ပြန်ချိတ်နေသည် ($attempt/3)...');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      }
+
+      final Uint8List chunkBytes = result!['audio'] as Uint8List;
+      allAudio.add(chunkBytes);
+
+      final chunkFile = File('${tempDir.path}/tts_chunk_$i.mp3');
+      await chunkFile.writeAsBytes(chunkBytes);
+
+      final List chunkTimings = result['timings'] as List;
+      int lastEndMs = 0;
+      for (final w in chunkTimings) {
+        final startMs = ((w['Offset'] as int) ~/ 10000) + currentOffsetMs;
+        final durMs = (w['Duration'] as int) ~/ 10000;
+        allTimings.add({
+          'startMs': startMs,
+          'endMs': startMs + durMs,
+          'text': w['text']['Text'].toString(),
+        });
+        final relEnd = ((w['Offset'] as int) + (w['Duration'] as int)) ~/ 10000;
+        if (relEnd > lastEndMs) lastEndMs = relEnd;
+      }
+
+      final exactMs = await _getExactAudioMs(chunkFile.path, lastEndMs + 150);
+      currentOffsetMs += exactMs;
+    }
+
+    await File(audioOutPath).writeAsBytes(allAudio.toBytes());
+    _writeTwoLineSrt(allTimings, srtOutPath);
+    onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် ၂ ကြောင်းစာတန်းထိုး ပြီးစီးပါပြီ။');
+    return [];
   }
 
   String _formatSrtTime(int ms) {
