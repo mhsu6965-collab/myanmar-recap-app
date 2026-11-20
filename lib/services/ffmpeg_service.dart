@@ -79,22 +79,23 @@ class FfmpegService {
     return '$h:$m:$s.$cs';
   }
 
-  // SRT ကို HarfBuzz (Complex Shaping) သုံးနိုင်သည့် ASS ဖိုင်အဖြစ်ပြောင်းပြီး အချိန်ပါတစ်ခါတည်း Sync ချိန်မည်
   Future<String> _convertSrtToAss({
     required String srtPath,
     required int outW,
     required int outH,
     required double subY,
-    required double timeScale,
+    required double subScale,
+    required String subColorAss,
   }) async {
     final srtContent = await File(srtPath).readAsString(encoding: utf8);
     final assPath = '${Directory.systemTemp.path}/subs_styled.ass';
 
     final isPortrait = outH >= outW;
-    final fontSize = isPortrait ? (outW * 0.044).round() : (outH * 0.050).round();
+    final baseFontSize = isPortrait ? (outW * 0.044) : (outH * 0.050);
+    final fontSize = (baseFontSize * subScale).round().clamp(16, 140);
     final marginLR = (outW * 0.06).round();
     final marginV = ((1.0 - subY).clamp(0.04, 0.90) * outH).round();
-    final outline = (outW * 0.0035).round().clamp(2, 4);
+    final outline = (outW * 0.0035 * subScale).round().clamp(2, 6);
 
     final ass = StringBuffer();
     ass.writeln('[Script Info]');
@@ -106,7 +107,7 @@ class FfmpegService {
     ass.writeln();
     ass.writeln('[V4+ Styles]');
     ass.writeln('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding');
-    ass.writeln('Style: Default,Pyidaungsu,$fontSize,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,2,$marginLR,$marginLR,$marginV,1');
+    ass.writeln('Style: Default,Pyidaungsu,$fontSize,$subColorAss,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,2,$marginLR,$marginLR,$marginV,1');
     ass.writeln();
     ass.writeln('[Events]');
     ass.writeln('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text');
@@ -118,8 +119,8 @@ class FfmpegService {
       final timeLine = lines[1];
       if (!timeLine.contains('-->')) continue;
       final times = timeLine.split('-->');
-      final startMs = (_parseSrtTimeMs(times[0]) * timeScale).round();
-      final endMs = (_parseSrtTimeMs(times[1]) * timeScale).round();
+      final startMs = _parseSrtTimeMs(times[0]);
+      final endMs = _parseSrtTimeMs(times[1]);
       final text = lines.sublist(2).join(r'\N').trim();
       if (text.isEmpty) continue;
       ass.writeln('Dialogue: 0,${_formatAssTime(startMs)},${_formatAssTime(endMs)},Default,,0,0,0,,$text');
@@ -135,6 +136,8 @@ class FfmpegService {
     required String srtPath,
     required List<BlurBox> blurs,
     required double subY,
+    double subScale = 1.0,
+    String subColorAss = '&H00FFFFFF',
     String resolution = '720p',
     Function(String)? onLog,
   }) async {
@@ -144,7 +147,6 @@ class FfmpegService {
     final int srcH = vidInfo['height'] as int;
     final double audDur = await getDuration(audioPath);
 
-    // Resolution 720p သို့မဟုတ် 1080p တွက်ချက်မည်
     final int targetShort = resolution == '1080p' ? 1080 : 720;
     int outW;
     int outH;
@@ -156,15 +158,12 @@ class FfmpegService {
       outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
     }
 
-    // ရုပ်နှင့်အသံ အတတ်နိုင်ဆုံး ကိုက်ညှိမည် (အသံမပျက်အောင် atempo ကို 0.88 - 1.25 အတွင်းညှိပြီး ကျန်တာကို video ညှိမည်)
-    final double rawRatio = audDur / vidDur;
-    final double appliedAtempo = rawRatio.clamp(0.88, 1.25);
-    final double newAudDur = audDur / appliedAtempo;
-    final double ptsRatio = newAudDur / vidDur;
-    final double subTimeScale = 1.0 / appliedAtempo;
+    // အသံကို မူရင်းအတိုင်း (1.0x) ထားပြီး ဗီဒီယိုရုပ်ကို အသံအချိန်အတိအကျနဲ့ ကိုက်အောင် မြန်/နှေး ချိန်မည်
+    final double ptsRatio = audDur / vidDur;
+    final double videoSpeed = vidDur / audDur;
 
     onLog?.call(
-      'FFmpeg ($resolution): ${outW}x$outH | အသံမြန်နှုန်း ${appliedAtempo.toStringAsFixed(2)}x | ဗီဒီယိုညှိနှုန်း ${ptsRatio.toStringAsFixed(2)}x',
+      'FFmpeg ($resolution): ${outW}x$outH | ဗီဒီယိုအမြန်နှုန်း ${videoSpeed.toStringAsFixed(2)}x (မူရင်း ${vidDur.toStringAsFixed(1)}s → အသံ ${audDur.toStringAsFixed(1)}s)',
     );
 
     final fontDir = await _prepareFontDir();
@@ -173,15 +172,17 @@ class FfmpegService {
       outW: outW,
       outH: outH,
       subY: subY,
-      timeScale: subTimeScale,
+      subScale: subScale,
+      subColorAss: subColorAss,
     );
 
     final outDir = Directory('/storage/emulated/0/Download');
     final saveFolder = await outDir.exists() ? outDir.path : Directory.systemTemp.path;
     final outputPath = '$saveFolder/recap_${resolution}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
+    // setpts ကို fps=30 ရှေ့ထားမှ Frame Rate မလွဲဘဲ ရုပ်နဲ့အသံ အတိအကျ ကိုက်မည်
     final buffer = StringBuffer();
-    buffer.write('[0:v]scale=$outW:$outH,fps=30,setpts=${ptsRatio.toStringAsFixed(4)}*PTS[v0];');
+    buffer.write('[0:v]scale=$outW:$outH,setpts=${ptsRatio.toStringAsFixed(6)}*PTS,fps=30[v0];');
     String currentLabel = 'v0';
     int idx = 1;
 
@@ -202,9 +203,8 @@ class FfmpegService {
       idx++;
     }
 
-    // ass filter + shaping=complex ဖြင့် မြန်မာ Font အမှန်ပေါ်စေမည်
     buffer.write('[$currentLabel]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
-    buffer.write('[1:a]atempo=${appliedAtempo.toStringAsFixed(4)},aresample=async=1:first_pts=0[a_out]');
+    buffer.write('[1:a]aresample=async=1:first_pts=0[a_out]');
 
     final presetArgs = resolution == '1080p'
         ? '-preset veryfast -crf 23 -threads 4'
@@ -214,7 +214,7 @@ class FfmpegService {
         '-filter_complex "${buffer.toString()}" '
         '-map "[v_out]" -map "[a_out]" '
         '-c:v libx264 $presetArgs -pix_fmt yuv420p '
-        '-c:a aac -b:a 128k -movflags +faststart -shortest "$outputPath"';
+        '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
 
     final session = await FFmpegKit.execute(cmd);
     final returnCode = await session.getReturnCode();
