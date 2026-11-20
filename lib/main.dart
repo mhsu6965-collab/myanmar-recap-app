@@ -88,6 +88,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
   String _apiProvider = 'Manual';
   String _resolution = '720p';
+  bool _enableMirror = false;
+  double _thumbSec = 3.0;
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -790,7 +792,57 @@ class _RecapHomePageState extends State<RecapHomePage> {
                   ),
                 ),
               ),
-
+            Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF181B24),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFF262A38)),
+              ),
+              child: Column(
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('ဗီဒီယို ဘယ်/ညာ လှည့်မယ် (Mirror)', style: TextStyle(fontSize: 13)),
+                    value: _enableMirror,
+                    onChanged: (v) => setState(() => _enableMirror = v),
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Slider(
+                          value: _thumbSec,
+                          min: 0,
+                          max: 60,
+                          divisions: 60,
+                          label: '${_thumbSec.toInt()}s',
+                          onChanged: (v) => setState(() => _thumbSec = v),
+                        ),
+                      ),
+                      ElevatedButton.icon(
+                        onPressed: (_isBusy || _videoPath == null)
+                            ? null
+                            : () async {
+                                try {
+                                  await FfmpegService().extractThumbnail(
+                                    videoPath: _videoPath!,
+                                    atSeconds: _thumbSec,
+                                    enableMirror: _enableMirror,
+                                    onLog: _addLog,
+                                  );
+                                } catch (e) {
+                                  _addLog('❌ $e');
+                                }
+                              },
+                        icon: const Icon(Icons.image_rounded, size: 16),
+                        label: Text('📸 Thumb (${_thumbSec.toInt()}s)', style: const TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
             if (_logs.isNotEmpty) ...[
               Container(
                 height: 160,
