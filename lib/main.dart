@@ -38,11 +38,43 @@ class RecapApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const RecapHomePage(),
+      home: const MainTabShell(),
     );
   }
 }
+class MainTabShell extends StatefulWidget {
+  const MainTabShell({super.key});
+  @override
+  State<MainTabShell> createState() => _MainTabShellState();
+}
 
+class _MainTabShellState extends State<MainTabShell> {
+  int _tabIdx = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _tabIdx,
+        children: const [
+          RecapHomePage(),
+          LongFormPage(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIdx,
+        backgroundColor: const Color(0xFF141720),
+        selectedItemColor: const Color(0xFF00E5FF),
+        unselectedItemColor: Colors.white54,
+        onTap: (i) => setState(() => _tabIdx = i),
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.bolt_rounded), label: 'Short Form'),
+          BottomNavigationBarItem(icon: Icon(Icons.movie_filter_rounded), label: 'Long Form (1hr+)'),
+        ],
+      ),
+    );
+  }
+}
 class RecapHomePage extends StatefulWidget {
   const RecapHomePage({super.key});
   @override
