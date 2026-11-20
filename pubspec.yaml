@@ -15,6 +15,7 @@ dependencies:
   web_socket_channel: ^3.0.1
   crypto: ^3.0.3
   uuid: ^4.4.0
+  gal: ^2.3.0
   ffmpeg_kit_flutter_new: ^4.6.3
 
 flutter:
