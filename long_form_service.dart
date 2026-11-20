@@ -4,14 +4,13 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart';
-import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:gal/gal.dart';
 import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ ၁ နာရီကျော် ဗီဒီယိုမှ 16kHz Mono MP3 (ဖိုင်သေး ~10-15MB) ခွဲထုတ်ပြီး Groq ဖြင့် Timestamp ယူမည်
+  // ၁။ 1hr+ ဗီဒီယိုမှ 16kHz Mono MP3 (ဖိုင်သေး ~10-15MB) ခွဲထုတ်ပြီး Groq ဖြင့် Timestamp ယူမည်
   Future<String> extractLongTimestamps({
     required String videoPath,
     required String groqApiKey,
@@ -51,7 +50,6 @@ class LongFormService {
       throw Exception('ဗီဒီယိုထဲတွင် စကားပြောအသံ မတွေ့ပါ');
     }
 
-    // ၁၅ စက္ကန့်ဝန်းကျင်စီ စုစည်းပြီး Gemini ဖတ်ရလွယ်အောင် ပြင်မည်
     final buffer = StringBuffer();
     double? groupStart;
     double groupEnd = 0.0;
@@ -81,7 +79,7 @@ class LongFormService {
     return buffer.toString().trim();
   }
 
-  // ၂။ မင်းပေးတဲ့ မြန်မာ .txt Script ကို Groq Timestamp နဲ့ Gemini သုံးပြီး [start-end] တွဲပေးမည်
+  // ၂။ မြန်မာ .txt Script ကို Groq Timestamp နှင့် Gemini သုံးပြီး [start-end] တွဲပေးမည်
   Future<String> alignScriptWithGemini({
     required String groqTimestamps,
     required String myanmarTxtScript,
@@ -165,7 +163,6 @@ $myanmarTxtScript
 
     if (allSegments.isEmpty) return [];
 
-    // မြန်မာစာလုံးရေ ~650 လုံး = TTS ၁ မိနစ်ဝန်းကျင် ခန့်မှန်းပြီး အပိုင်းခွဲမည်
     final int targetChars = minutesPerPart * 650;
     final parts = [];
     final currentPart = [];
@@ -268,7 +265,7 @@ $myanmarTxtScript
     return assPath;
   }
 
-  // ၄။ Part တစ်ခုချင်းစီကို RAM မပြည့်အောင် Clip လိုက် Fast-Seek ဖြတ်ပြီး Render ထုတ်မည်
+  // ၄။ Part တစ်ခုချင်းစီကို Speed (0.6x) + 6s Play / 3s Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -277,6 +274,10 @@ $myanmarTxtScript
     required int ratePercent,
     required int pitchHz,
     required String resolution,
+    required bool enableCopyrightSafe,
+    required double videoSpeed,
+    required double playSec,
+    required double freezeSec,
     required bool enableSubtitles,
     required double subY,
     required double subScale,
@@ -324,29 +325,86 @@ $myanmarTxtScript
       outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
     }
 
-    // RAM မပြည့်အောင် Clip တစ်ခုချင်းစီကို Fast-Seek (-ss) နဲ့ ဖြတ်ပြီး Temp MP4 သိမ်းမည်
     final clipListBuf = StringBuffer();
     final presetFast = '-preset ultrafast -crf 25 -threads 2';
+    int clipCounter = 0;
+    bool zoomInToggle = true;
 
     for (int i = 0; i < syncSegments.length; i++) {
       final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
       final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
-      final double segVidDur = (vEnd - vStart) > 0.2 ? (vEnd - vStart) : 2.0;
+      final double segVidDur = (vEnd - vStart) > 0.5 ? (vEnd - vStart) : 4.0;
       final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
-      final double ratio = (segAudDur / segVidDur).clamp(0.25, 4.0);
 
-      final clipPath = '${tempDir.path}/p${partNumber}_clip_$i.mp4';
-      onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
+      if (!enableCopyrightSafe) {
+        final double ratio = (segAudDur / segVidDur).clamp(0.25, 4.0);
+        final clipPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
+        final cmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
+            '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
+            '-an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
+        final s = await FFmpegKit.execute(cmd);
+        if (!ReturnCode.isSuccess(await s.getReturnCode())) {
+          throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
+        }
+        clipListBuf.writeln("file '$clipPath'");
+      } else {
+        // Copyright-Safe Mode: Speed (0.6x) ဖြင့် 6s Play → 3s Freeze & Zoom In/Out
+        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Speed ${videoSpeed}x + Freeze/Zoom]...');
+        double remaining = segAudDur;
+        double curSrcPos = vStart;
+        final double ptsMult = 1.0 / videoSpeed.clamp(0.4, 1.0);
 
-      final clipCmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
-          '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
-          '-an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
+        while (remaining > 0.15) {
+          // (က) Play Clip (အများဆုံး playSec စက္ကန့်)
+          final double playDur = remaining >= playSec ? playSec : remaining;
+          final double srcNeeded = playDur * videoSpeed;
+          if (curSrcPos + srcNeeded > vEnd) {
+            curSrcPos = vStart;
+          }
 
-      final s = await FFmpegKit.execute(clipCmd);
-      if (!ReturnCode.isSuccess(await s.getReturnCode())) {
-        throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
+          final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+          final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.2).toStringAsFixed(3)} -i "$videoPath" '
+              '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
+              '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
+
+          final sPlay = await FFmpegKit.execute(playCmd);
+          if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
+            throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
+          }
+          clipListBuf.writeln("file '$playPath'");
+
+          curSrcPos += srcNeeded;
+          remaining -= playDur;
+
+          // (ခ) ကျန်အချိန်ရှိသေးရင် Freeze + Zoom In/Out (အများဆုံး freezeSec စက္ကန့်)
+          if (remaining > 0.4) {
+            final double fDur = remaining >= freezeSec ? freezeSec : remaining;
+            final int totalFrames = (fDur * 30).round().clamp(15, 300);
+            final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
+            final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+
+            await FFmpegKit.execute(
+              '-y -ss ${curSrcPos.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
+            );
+
+            final zoomExpr = zoomInToggle
+                ? "min(zoom+0.0022,1.22)"
+                : "if(lte(on,1),1.22,max(1.0,zoom-0.0022))";
+            zoomInToggle = !zoomInToggle;
+
+            final freezeCmd = '-y -i "$frameImg" '
+                '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
+                '-t ${fDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
+
+            final sFreeze = await FFmpegKit.execute(freezeCmd);
+            if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
+              clipListBuf.writeln("file '$freezePath'");
+              remaining -= fDur;
+            }
+          }
+        }
       }
-      clipListBuf.writeln("file '$clipPath'");
     }
 
     final listFile = File('${tempDir.path}/p${partNumber}_list.txt');
@@ -360,7 +418,6 @@ $myanmarTxtScript
       throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
     }
 
-    // Blur / Subtitle / BGM ပေါင်းထည့်မည်
     final outDir = Directory('/storage/emulated/0/Download');
     final saveFolder = await outDir.exists() ? outDir.path : tempDir.path;
     final outputPath = '$saveFolder/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
@@ -429,14 +486,14 @@ $myanmarTxtScript
     if (saveToGallery) {
       try {
         await Gal.putVideo(outputPath, album: 'Myanmar Recap');
-        onLog?.call('Part $partNumber ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
+        onLog?.call('✅ Part $partNumber ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
       } catch (_) {}
     }
 
     return outputPath;
   }
 
-  // ၅။ ထွက်ပြီးသား Part တွေအားလုံးကို YouTube အတွက် ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy ဖြင့် စက္ကန့်ပိုင်းအတွင်း)
+  // ၅။ Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
   Future<String> mergeAllParts({
     required List<String> partPaths,
     Function(String)? onLog,
