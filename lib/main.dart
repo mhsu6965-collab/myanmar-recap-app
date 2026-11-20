@@ -309,6 +309,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
         subColorAss: _subColors[_selectedColorIdx]['ass'] as String,
         resolution: _resolution,
         syncSegments: syncSegments,
+        enableMirror: _enableMirror,
         onLog: _addLog,
       );
 
