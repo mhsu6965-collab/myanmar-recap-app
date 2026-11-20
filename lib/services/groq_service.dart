@@ -59,7 +59,7 @@ class GroqService {
       groupText.write(text);
 
       final isLast = i == rawSegments.length - 1;
-      if ((groupEnd - groupStart) >= 12.0 || isLast) {
+      if ((groupEnd - groupStart) >= 5.0 || isLast) {
         buffer.writeln('[${groupStart.toStringAsFixed(1)}-${groupEnd.toStringAsFixed(1)}] ${groupText.toString().trim()}');
         groupStart = null;
         groupText.clear();
