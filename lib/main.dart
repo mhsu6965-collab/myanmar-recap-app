@@ -822,7 +822,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
                         ),
                       ),
                       ElevatedButton.icon(
-                        onPressed: (_isBusy || _videoPath == null)
+                        onPressed: (_isProcessing || _videoPath == null)
                             ? null
                             : () async {
                                 try {
