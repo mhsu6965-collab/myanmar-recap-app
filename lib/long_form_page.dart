@@ -120,6 +120,7 @@ class _LongFormPageState extends State<LongFormPage> {
   }
 
   Future<void> _prepareParts() async {
+    await _loadSavedKeys(); // <--- ဒီ ၁ ကြောင်း ထည့်ပါ
     final geminiKeys = _parseGeminiKeys();
     if (_videoPath == null) {
       setState(() => _errorMsg = '၁ နာရီစာ ဗီဒီယိုကို အရင်ရွေးပါ');
