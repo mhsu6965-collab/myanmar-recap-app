@@ -8,6 +8,7 @@ import 'services/gemini_service.dart';
 import 'services/groq_service.dart';
 import 'services/edge_tts_service.dart';
 import 'services/ffmpeg_service.dart';
+import 'long_form_page.dart';
 
 void main() => runApp(const RecapApp());
 
