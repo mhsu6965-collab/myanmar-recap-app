@@ -66,6 +66,17 @@ class _RecapHomePageState extends State<RecapHomePage> {
   final BlurBox _blur1 = BlurBox(enabled: true, x: 0.05, y: 0.72, w: 0.90, h: 0.12);
   final BlurBox _blur2 = BlurBox(enabled: false, x: 0.05, y: 0.10, w: 0.90, h: 0.10);
   double _subY = 0.85;
+  double _subScale = 1.0;
+  int _selectedColorIdx = 0;
+
+  // စာတန်းအရောင် ၅ ရောင် (ASS Format: &H00BBGGRR)
+  static const List> _subColors = [
+    {'name': 'အဖြူ', 'color': Colors.white, 'ass': '&H00FFFFFF'},
+    {'name': 'အဝါ', 'color': Color(0xFFFFEB3B), 'ass': '&H003BEBFF'},
+    {'name': 'အပြာနု', 'color': Color(0xFF00E5FF), 'ass': '&H00FFE500'},
+    {'name': 'အစိမ်း', 'color': Color(0xFF00FF66), 'ass': '&H0066FF00'},
+    {'name': 'လိမ္မော်', 'color': Color(0xFFFF9800), 'ass': '&H000098FF'},
+  ];
 
   int _currentStep = 0;
   bool _isProcessing = false;
@@ -260,6 +271,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
         srtPath: srtPath,
         blurs: [_blur1, _blur2],
         subY: _subY,
+        subScale: _subScale,
+        subColorAss: _subColors[_selectedColorIdx]['ass'] as String,
         resolution: _resolution,
         onLog: _addLog,
       );
@@ -352,21 +365,29 @@ class _RecapHomePageState extends State<RecapHomePage> {
   }
 
   Widget _buildDraggableSubtitle(double maxW, double maxH) {
+    final previewColor = _subColors[_selectedColorIdx]['color'] as Color;
     return Positioned(
       left: maxW * 0.05,
-      top: (_subY * maxH) - 16,
+      top: (_subY * maxH) - 18,
       width: maxW * 0.90,
-      height: 32,
+      height: 36,
       child: GestureDetector(
         onVerticalDragUpdate: (d) => setState(() => _subY = (_subY + d.delta.dy / maxH).clamp(0.08, 0.95)),
         child: Container(
           decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.55),
-            border: Border.all(color: Colors.greenAccent, width: 1.5),
+            color: Colors.black.withOpacity(0.55),
+            border: Border.all(color: previewColor, width: 1.5),
             borderRadius: BorderRadius.circular(6),
           ),
           alignment: Alignment.center,
-          child: const Text('↕ မြန်မာစာတန်း (၂ ကြောင်း)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+          child: Text(
+            '↕ မြန်မာစာတန်း (${(_subScale * 100).round()}%)',
+            style: TextStyle(
+              color: previewColor,
+              fontWeight: FontWeight.bold,
+              fontSize: (11 * _subScale).clamp(9.0, 18.0),
+            ),
+          ),
         ),
       ),
     );
@@ -460,7 +481,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
             ),
 
             _sectionCard(
-              title: 'Video & Blur Editor',
+              title: 'Video, Blur & Subtitle Style',
               icon: Icons.movie_edit,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -487,6 +508,40 @@ class _RecapHomePageState extends State<RecapHomePage> {
                       DropdownMenuItem(value: '1080p', child: Text('1080p Full HD (ကြည်လင် / CPU ပိုသုံး)')),
                     ],
                     onChanged: (v) => setState(() => _resolution = v!),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('စာတန်းအရွယ်အစား (Size)', style: TextStyle(fontSize: 13)),
+                      Text('${(_subScale * 100).round()}%', style: const TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  Slider(
+                    value: _subScale,
+                    min: 0.5,
+                    max: 2.0,
+                    divisions: 15,
+                    onChanged: (v) => setState(() => _subScale = v),
+                  ),
+                  const Text('စာတန်းအရောင် (Color)', style: TextStyle(fontSize: 13)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: List.generate(_subColors.length, (idx) {
+                      final item = _subColors[idx];
+                      final color = item['color'] as Color;
+                      final selected = _selectedColorIdx == idx;
+                      return ChoiceChip(
+                        label: Text(item['name'] as String, style: TextStyle(color: selected ? Colors.black : Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                        selected: selected,
+                        selectedColor: color,
+                        backgroundColor: const Color(0xFF262A38),
+                        avatar: CircleAvatar(backgroundColor: color, radius: 7),
+                        onSelected: (_) => setState(() => _selectedColorIdx = idx),
+                      );
+                    }),
                   ),
                   if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
                     const SizedBox(height: 12),
@@ -665,14 +720,13 @@ class _RecapHomePageState extends State<RecapHomePage> {
                     _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
                     _buildStepTile(2, '၂။ မြန်မာဘာသာပြန် Script ပြင်ဆင်ခြင်း'),
                     _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် ၂ ကြောင်းစာတန်းထုတ်ခြင်း'),
-                    _buildStepTile(4, '၄။ $_resolution Blur, မြန်မာ Font နှင့် ရုပ်/အသံ Sync ပေါင်းထုတ်ခြင်း'),
+                    _buildStepTile(4, '၄။ $_resolution Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ Sync ပေါင်းထုတ်ခြင်း'),
                     _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
                   ],
                 ),
               ),
             ],
 
-            // Save ပြီးသား ဗီဒီယိုကို နှိပ်ပြီး တန်းကြည့်နိုင်သည့် Card
             if (_outputPath.isNotEmpty)
               InkWell(
                 onTap: _openSavedVideoPlayer,
