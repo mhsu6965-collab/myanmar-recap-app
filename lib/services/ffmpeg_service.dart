@@ -142,6 +142,7 @@ class FfmpegService {
     String subColorAss = '&H00FFFFFF',
     String resolution = '720p',
     List? syncSegments,
+    bool enableMirror = false,
     Function(String)? onLog,
   }) async {
     final vidInfo = await getVideoInfo(videoPath);
@@ -229,10 +230,14 @@ class FfmpegService {
       idx++;
     }
 
+    if (enableMirror) {
+      buffer.writeln('[$currentLabel]hflip[v_flip];');
+      currentLabel = 'v_flip';
+    }
+
     buffer.writeln('[$currentLabel]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
     buffer.write('[1:a]aresample=async=1:first_pts=0[a_out]');
 
-    // Filter ရှည်ရင် Command Error မတက်အောင် ဖိုင်ထဲရေးပြီး -filter_complex_script နဲ့ ခေါ်မည်
     final filterScriptPath = '${Directory.systemTemp.path}/ffmpeg_filter.txt';
     await File(filterScriptPath).writeAsString(buffer.toString(), encoding: utf8);
 
@@ -253,6 +258,7 @@ class FfmpegService {
       final logs = await session.getAllLogsAsString();
       throw Exception('FFmpeg Render မအောင်မြင်ပါ:\n$logs');
     }
+
     try {
       await Gal.putVideo(outputPath, album: 'Myanmar Recap');
       onLog?.call('Gallery (Myanmar Recap Album) ထဲသို့ သိမ်းဆည်းပြီးပါပြီ။');
@@ -261,5 +267,28 @@ class FfmpegService {
     }
 
     return outputPath;
+  }
+
+  Future<String> extractThumbnail({
+    required String videoPath,
+    double atSeconds = 3.0,
+    bool enableMirror = false,
+    Function(String)? onLog,
+  }) async {
+    final tempDir = Directory.systemTemp;
+    final thumbPath = '${tempDir.path}/thumb_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final vf = enableMirror ? '-vf "hflip"' : '';
+
+    onLog?.call('Thumbnail ပုံထုတ်နေသည် (${atSeconds.toInt()}s နေရာ)...');
+    final session = await FFmpegKit.execute(
+      '-y -ss ${atSeconds.toStringAsFixed(2)} -i "$videoPath" $vf -frames:v 1 -q:v 2 "$thumbPath"',
+    );
+    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
+      throw Exception('Thumbnail ထုတ်မရပါ');
+    }
+
+    await Gal.putImage(thumbPath, album: 'Myanmar Recap');
+    onLog?.call('✅ Thumbnail ကို Gallery (Myanmar Recap) ထဲ သိမ်းပြီးပါပြီ။');
+    return thumbPath;
   }
 }
