@@ -253,6 +253,12 @@ class FfmpegService {
       final logs = await session.getAllLogsAsString();
       throw Exception('FFmpeg Render မအောင်မြင်ပါ:\n$logs');
     }
+    try {
+      await Gal.putVideo(outputPath, album: 'Myanmar Recap');
+      onLog?.call('Gallery (Myanmar Recap Album) ထဲသို့ သိမ်းဆည်းပြီးပါပြီ။');
+    } catch (e) {
+      onLog?.call('Gallery ထဲထည့်ရာတွင် အမှားရှိသည်: $e');
+    }
 
     return outputPath;
   }
