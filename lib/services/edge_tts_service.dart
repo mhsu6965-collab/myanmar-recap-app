@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/io.dart';
 
@@ -34,6 +35,21 @@ class EdgeTtsService {
       remaining = remaining.substring(splitAt + 1).trim();
     }
     return chunks.where((c) => c.isNotEmpty).toList();
+  }
+
+  // စာတန်းကို အများဆုံး ၂ ကြောင်းဖြစ်အောင် ခွဲပေးမည်
+  String _formatTwoLines(String text) {
+    final clean = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (clean.length <= 24) return clean;
+    final mid = clean.length ~/ 2;
+    int splitIdx = clean.indexOf(' ', mid);
+    if (splitIdx == -1 || splitIdx > clean.length - 4) {
+      splitIdx = clean.lastIndexOf(' ', mid);
+    }
+    if (splitIdx > 4 && splitIdx < clean.length - 4) {
+      return '${clean.substring(0, splitIdx).trim()}\n${clean.substring(splitIdx + 1).trim()}';
+    }
+    return clean;
   }
 
   Future _synthesizeChunk({
@@ -127,6 +143,17 @@ class EdgeTtsService {
     return {'audio': audioBytes.toBytes(), 'timings': wordTimings};
   }
 
+  Future<int> _getExactAudioMs(String filePath, int fallbackMs) async {
+    try {
+      final session = await FFprobeKit.getMediaInformation(filePath);
+      final durStr = session.getMediaInformation()?.getDuration();
+      if (durStr != null) {
+        return (double.parse(durStr) * 1000).round();
+      }
+    } catch (_) {}
+    return fallbackMs;
+  }
+
   Future<void> synthesize({
     required String text,
     required String voice,
@@ -142,9 +169,10 @@ class EdgeTtsService {
 
     onLog?.call('Edge TTS: စာသားကို ${chunks.length} ပိုင်းခွဲပြီး အသံထုတ်နေသည်...');
 
+    final tempDir = Directory.systemTemp;
     final allAudio = BytesBuilder();
     final allTimings = [];
-    int timeOffsetTicks = 0;
+    int currentOffsetMs = 0;
 
     for (int i = 0; i < chunks.length; i++) {
       onLog?.call('Edge TTS: အပိုင်း (${i + 1}/${chunks.length}) ထုတ်နေသည်...');
@@ -166,39 +194,64 @@ class EdgeTtsService {
         }
       }
 
-      allAudio.add(result!['audio'] as Uint8List);
+      final Uint8List chunkBytes = result!['audio'] as Uint8List;
+      allAudio.add(chunkBytes);
+
+      // အပိုင်းတစ်ခုချင်းစီ၏ အသံကြာချိန်အတိအကျကို FFprobe ဖြင့်တိုင်းပြီး Sync ချိန်မည်
+      final chunkFile = File('${tempDir.path}/tts_chunk_$i.mp3');
+      await chunkFile.writeAsBytes(chunkBytes);
+
       final List chunkTimings = result['timings'] as List;
-      int lastEnd = 0;
+      int lastEndMs = 0;
       for (final w in chunkTimings) {
-        final offset = (w['Offset'] as int) + timeOffsetTicks;
-        final dur = w['Duration'] as int;
-        allTimings.add({'Offset': offset, 'Duration': dur, 'text': w['text']});
-        if ((w['Offset'] as int) + dur > lastEnd) {
-          lastEnd = (w['Offset'] as int) + dur;
-        }
+        final startMs = ((w['Offset'] as int) ~/ 10000) + currentOffsetMs;
+        final durMs = (w['Duration'] as int) ~/ 10000;
+        allTimings.add({
+          'startMs': startMs,
+          'endMs': startMs + durMs,
+          'text': w['text']['Text'].toString(),
+        });
+        final relEnd = ((w['Offset'] as int) + (w['Duration'] as int)) ~/ 10000;
+        if (relEnd > lastEndMs) lastEndMs = relEnd;
       }
-      timeOffsetTicks += lastEnd + 2000000;
+
+      final exactMs = await _getExactAudioMs(chunkFile.path, lastEndMs + 150);
+      currentOffsetMs += exactMs;
     }
 
     await File(audioOutPath).writeAsBytes(allAudio.toBytes());
-    onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် SRT စာတန်းထိုးဖိုင် ပြီးစီးပါပြီ။');
+    onLog?.call('Edge TTS: MP3 အသံဖိုင် နှင့် ၂ ကြောင်းစာတန်းထိုး ပြီးစီးပါပြီ။');
 
+    // စာလုံးရေ ၄၄ လုံးဝန်းကျင်စီ ဖြတ်ပြီး အများဆုံး ၂ ကြောင်းပဲ ထွက်အောင် SRT ရေးမည်
     final srtBuffer = StringBuffer();
     int subIndex = 1;
-    for (int i = 0; i < allTimings.length; i += 8) {
-      final chunk = allTimings.sublist(
-        i,
-        (i + 8 > allTimings.length) ? allTimings.length : i + 8,
-      );
-      final startMs = (chunk.first['Offset'] as int) ~/ 10000;
-      final endMs = ((chunk.last['Offset'] as int) + (chunk.last['Duration'] as int)) ~/ 10000;
-      final lineText = chunk.map((w) => w['text']['Text']).join(' ');
+    int i = 0;
+    while (i < allTimings.length) {
+      final int cueStart = allTimings[i]['startMs'] as int;
+      int cueEnd = allTimings[i]['endMs'] as int;
+      final lineBuf = StringBuffer();
+      int count = 0;
 
+      while (i < allTimings.length) {
+        final word = allTimings[i]['text'] as String;
+        if (count > 0 && (lineBuf.length + word.length > 44 || count >= 5)) {
+          break;
+        }
+        if (lineBuf.isNotEmpty) lineBuf.write(' ');
+        lineBuf.write(word);
+        cueEnd = allTimings[i]['endMs'] as int;
+        count++;
+        i++;
+        if (word.endsWith('။')) break;
+      }
+
+      if (cueEnd <= cueStart) cueEnd = cueStart + 600;
       srtBuffer.writeln(subIndex++);
-      srtBuffer.writeln('${_formatSrtTime(startMs)} --> ${_formatSrtTime(endMs)}');
-      srtBuffer.writeln(lineText);
+      srtBuffer.writeln('${_formatSrtTime(cueStart)} --> ${_formatSrtTime(cueEnd)}');
+      srtBuffer.writeln(_formatTwoLines(lineBuf.toString()));
       srtBuffer.writeln();
     }
+
     await File(srtOutPath).writeAsString(srtBuffer.toString(), encoding: utf8);
   }
 
