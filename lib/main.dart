@@ -760,6 +760,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
 
             if (_logs.isNotEmpty) ...[
               Container(
+                height: 160,
                 padding: const EdgeInsets.all(12),
                 margin: const EdgeInsets.only(bottom: 12),
                 decoration: BoxDecoration(
@@ -772,7 +773,19 @@ class _RecapHomePageState extends State<RecapHomePage> {
                   children: [
                     const Text('📋 Live Log', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12)),
                     const SizedBox(height: 6),
-                    ..._logs.map((l) => Text(l, style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace'))),
+                    Expanded(
+                      child: ListView.builder(
+                        reverse: true,
+                        itemCount: _logs.length,
+                        itemBuilder: (context, index) {
+                          final log = _logs[_logs.length - 1 - index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 3),
+                            child: Text(log, style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace')),
+                          );
+                        },
+                      ),
+                    ),
                   ],
                 ),
               ),
