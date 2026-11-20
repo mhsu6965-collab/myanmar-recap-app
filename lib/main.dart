@@ -1,863 +1,258 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:video_player/video_player.dart';
-import 'services/gemini_service.dart';
-import 'services/groq_service.dart';
-import 'services/edge_tts_service.dart';
-import 'services/ffmpeg_service.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart';
+import 'package:ffmpeg_kit_flutter_new/ffprobe_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 
-void main() => runApp(const RecapApp());
+class BlurBox {
+  bool enabled;
+  double x;
+  double y;
+  double w;
+  double h;
 
-class RecapApp extends StatelessWidget {
-  const RecapApp({super.key});
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0E1016),
-        cardColor: const Color(0xFF181B24),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF7C4DFF),
-          secondary: Color(0xFF00E5FF),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: const Color(0xFF11131A),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF2A2E3D)),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF2A2E3D)),
-          ),
-        ),
-      ),
-      home: const RecapHomePage(),
-    );
-  }
+  BlurBox({
+    required this.enabled,
+    required this.x,
+    required this.y,
+    required this.w,
+    required this.h,
+  });
 }
 
-class RecapHomePage extends StatefulWidget {
-  const RecapHomePage({super.key});
-  @override
-  State<RecapHomePage> createState() => _RecapHomePageState();
-}
+class FfmpegService {
+  Future getVideoInfo(String filePath) async {
+    final session = await FFprobeKit.getMediaInformation(filePath);
+    final info = session.getMediaInformation();
+    final durStr = info?.getDuration();
+    if (durStr == null) throw Exception('Media duration ဖတ်မရပါ');
 
-class _RecapHomePageState extends State<RecapHomePage> {
-  final _groqKeyCtrl = TextEditingController();
-  final _geminiKeysCtrl = TextEditingController();
-  final _manualScriptCtrl = TextEditingController();
-
-  String _apiProvider = 'Manual';
-  String _resolution = '720p';
-
-  String? _videoPath;
-  VideoPlayerController? _videoCtrl;
-
-  String _voice = 'my-MM-NilarNeural';
-  double _rate = 10;
-  double _pitch = 0;
-
-  final BlurBox _blur1 = BlurBox(enabled: true, x: 0.05, y: 0.72, w: 0.90, h: 0.12);
-  final BlurBox _blur2 = BlurBox(enabled: false, x: 0.05, y: 0.10, w: 0.90, h: 0.10);
-  double _subY = 0.85;
-  double _subScale = 1.0;
-  int _selectedColorIdx = 0;
-
-  // စာတန်းအရောင် ၅ ရောင် (ASS Format: &H00BBGGRR)
-  static const _subColors = [
-    {'name': 'အဖြူ', 'color': Colors.white, 'ass': '&H00FFFFFF'},
-    {'name': 'အဝါ', 'color': Color(0xFFFFEB3B), 'ass': '&H003BEBFF'},
-    {'name': 'အပြာနု', 'color': Color(0xFF00E5FF), 'ass': '&H00FFE500'},
-    {'name': 'အစိမ်း', 'color': Color(0xFF00FF66), 'ass': '&H0066FF00'},
-    {'name': 'လိမ္မော်', 'color': Color(0xFFFF9800), 'ass': '&H000098FF'},
-  ];
-
-  int _currentStep = 0;
-  bool _isProcessing = false;
-  bool _isTranscribing = false;
-  String _errorMsg = '';
-  String _outputPath = '';
-  final List<String> _logs = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSavedKeys();
-  }
-
-  void _addLog(String msg) {
-    final now = DateTime.now();
-    final time = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
-    setState(() => _logs.add('[$time] $msg'));
-  }
-
-  File _getKeysFile() => File('${Directory.systemTemp.parent.path}/recap_saved_keys.json');
-
-  Future<void> _loadSavedKeys() async {
-    try {
-      final file = _getKeysFile();
-      if (await file.exists()) {
-        final data = jsonDecode(await file.readAsString());
-        setState(() {
-          _groqKeyCtrl.text = data['groq'] ?? '';
-          _geminiKeysCtrl.text = data['gemini'] ?? '';
-        });
+    int width = 720;
+    int height = 1280;
+    for (final stream in info?.getStreams() ?? []) {
+      if (stream.getType() == 'video') {
+        width = stream.getWidth() ?? 720;
+        height = stream.getHeight() ?? 1280;
+        break;
       }
-    } catch (_) {}
-  }
-
-  Future<void> _saveKeys() async {
-    try {
-      await _getKeysFile().writeAsString(jsonEncode({
-        'groq': _groqKeyCtrl.text.trim(),
-        'gemini': _geminiKeysCtrl.text.trim(),
-      }));
-    } catch (_) {}
-  }
-
-  List<String> _parseGeminiKeys() {
-    return _geminiKeysCtrl.text
-        .split(RegExp(r'[\n,]+'))
-        .map((k) => k.trim())
-        .where((k) => k.isNotEmpty)
-        .toList();
-  }
-
-  @override
-  void dispose() {
-    _videoCtrl?.dispose();
-    _groqKeyCtrl.dispose();
-    _geminiKeysCtrl.dispose();
-    _manualScriptCtrl.dispose();
-    super.dispose();
-  }
-
-  Future<void> _pickVideo() async {
-    final file = await FilePicker.pickFile(type: FileType.video);
-    if (file != null && file.path != null) {
-      await _videoCtrl?.dispose();
-      final ctrl = VideoPlayerController.file(File(file.path!));
-      await ctrl.initialize();
-      setState(() {
-        _videoPath = file.path;
-        _videoCtrl = ctrl;
-        _errorMsg = '';
-        _outputPath = '';
-        _currentStep = 0;
-        _logs.clear();
-      });
     }
+    return {'duration': double.parse(durStr), 'width': width, 'height': height};
   }
 
-  void _openSavedVideoPlayer() {
-    if (_outputPath.isEmpty || !File(_outputPath).existsSync()) return;
-    _videoCtrl?.pause();
-    showDialog(
-      context: context,
-      builder: (_) => _SavedVideoPlayerDialog(videoPath: _outputPath),
-    );
+  Future<double> getDuration(String filePath) async {
+    final session = await FFprobeKit.getMediaInformation(filePath);
+    final durStr = session.getMediaInformation()?.getDuration();
+    if (durStr == null) throw Exception('Audio duration ဖတ်မရပါ');
+    return double.parse(durStr);
   }
 
-  Future<void> _extractTranscriptOnly() async {
-    await _saveKeys();
-    if (_videoPath == null) {
-      setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
-      return;
-    }
-    if (_groqKeyCtrl.text.trim().isEmpty) {
-      setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
-      return;
-    }
+  Future<String> _prepareFontDir() async {
+    final fontDir = Directory('${Directory.systemTemp.path}/fonts');
+    if (!await fontDir.exists()) await fontDir.create(recursive: true);
 
-    setState(() {
-      _isTranscribing = true;
-      _errorMsg = '';
-      _logs.clear();
-      _currentStep = 1;
-    });
-
-    try {
-      _addLog('Groq: ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
-      final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
-      _addLog('Groq: Script ထုတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
-      setState(() {
-        _manualScriptCtrl.text = transcript;
-        _currentStep = 2;
-      });
-    } catch (e) {
-      _addLog('❌ Error: $e');
-      setState(() => _errorMsg = e.toString());
-    } finally {
-      setState(() => _isTranscribing = false);
+    final fontFile = File('${fontDir.path}/Pyidaungsu.ttf');
+    if (!await fontFile.exists()) {
+      final data = await rootBundle.load('assets/fonts/Pyidaungsu.ttf');
+      await fontFile.writeAsBytes(data.buffer.asUint8List());
     }
+    await FFmpegKitConfig.setFontDirectoryList([fontDir.path, '/system/fonts']);
+    return fontDir.path;
   }
 
-  Future<void> _startRecap() async {
-    await _saveKeys();
-    final geminiKeys = _parseGeminiKeys();
+  int _parseSrtTimeMs(String t) {
+    final parts = t.trim().split(RegExp(r'[:,.]'));
+    if (parts.length < 4) return 0;
+    return int.parse(parts[0]) * 3600000 +
+        int.parse(parts[1]) * 60000 +
+        int.parse(parts[2]) * 1000 +
+        int.parse(parts[3]);
+  }
 
-    if (_videoPath == null) {
-      setState(() => _errorMsg = 'ဗီဒီယိုကို အရင်ရွေးပါ');
-      return;
+  String _formatAssTime(int ms) {
+    final safeMs = ms < 0 ? 0 : ms;
+    final h = safeMs ~/ 3600000;
+    final m = ((safeMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
+    final s = ((safeMs % 60000) ~/ 1000).toString().padLeft(2, '0');
+    final cs = ((safeMs % 1000) ~/ 10).toString().padLeft(2, '0');
+    return '$h:$m:$s.$cs';
+  }
+
+  Future<String> _convertSrtToAss({
+    required String srtPath,
+    required int outW,
+    required int outH,
+    required double subY,
+    required double subScale,
+    required String subColorAss,
+  }) async {
+    final srtContent = await File(srtPath).readAsString(encoding: utf8);
+    final assPath = '${Directory.systemTemp.path}/subs_styled.ass';
+
+    final baseFontSize = outH * 0.052;
+    final fontSize = (baseFontSize * subScale).round().clamp(20, 180);
+    final outline = (fontSize * 0.07).round().clamp(2, 8);
+    final marginLR = (outW * 0.05).round();
+
+    final posX = outW ~/ 2;
+    final posY = (subY.clamp(0.05, 0.95) * outH).round();
+
+    final ass = StringBuffer();
+    ass.writeln('[Script Info]');
+    ass.writeln('ScriptType: v4.00+');
+    ass.writeln('PlayResX: $outW');
+    ass.writeln('PlayResY: $outH');
+    ass.writeln('WrapStyle: 2');
+    ass.writeln('ScaledBorderAndShadow: yes');
+    ass.writeln();
+    ass.writeln('[V4+ Styles]');
+    ass.writeln('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding');
+    ass.writeln('Style: Default,Pyidaungsu,$fontSize,$subColorAss,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,5,$marginLR,$marginLR,0,1');
+    ass.writeln();
+    ass.writeln('[Events]');
+    ass.writeln('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text');
+
+    final blocks = srtContent.trim().split(RegExp(r'\r?\n\r?\n'));
+    for (final block in blocks) {
+      final lines = block.split(RegExp(r'\r?\n'));
+      if (lines.length < 3) continue;
+      final timeLine = lines[1];
+      if (!timeLine.contains('-->')) continue;
+      final times = timeLine.split('-->');
+      final startMs = _parseSrtTimeMs(times[0]);
+      final endMs = _parseSrtTimeMs(times[1]);
+      final text = lines.sublist(2).join(r'\N').trim();
+      if (text.isEmpty) continue;
+      ass.writeln('Dialogue: 0,${_formatAssTime(startMs)},${_formatAssTime(endMs)},Default,,0,0,0,,{\\an5\\pos($posX,$posY)}$text');
     }
 
-    if (_apiProvider == 'Manual') {
-      if (_manualScriptCtrl.text.trim().isEmpty) {
-        setState(() => _errorMsg = 'ဘာသာပြန်ထားတဲ့ မြန်မာစာသားကို အကွက်ထဲ အရင် Paste ထည့်ပါ');
-        return;
-      }
+    await File(assPath).writeAsString(ass.toString(), encoding: utf8);
+    return assPath;
+  }
+
+  Future<String> renderRecapVideo({
+    required String videoPath,
+    required String audioPath,
+    required String srtPath,
+    required List<BlurBox> blurs,
+    required double subY,
+    double subScale = 1.0,
+    String subColorAss = '&H00FFFFFF',
+    String resolution = '720p',
+    List? syncSegments,
+    Function(String)? onLog,
+  }) async {
+    final vidInfo = await getVideoInfo(videoPath);
+    final double vidDur = vidInfo['duration'] as double;
+    final int srcW = vidInfo['width'] as int;
+    final int srcH = vidInfo['height'] as int;
+    final double audDur = await getDuration(audioPath);
+
+    final int targetShort = resolution == '1080p' ? 1080 : 720;
+    int outW;
+    int outH;
+    if (srcH >= srcW) {
+      outW = targetShort;
+      outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
     } else {
-      if (_apiProvider == 'Hybrid' && _groqKeyCtrl.text.trim().isEmpty) {
-        setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
-        return;
-      }
-      if ((_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') && geminiKeys.isEmpty) {
-        setState(() => _errorMsg = 'Gemini API Key အနည်းဆုံး ၁ ခု ထည့်ပါ');
-        return;
-      }
+      outH = targetShort;
+      outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
     }
 
-    setState(() {
-      _isProcessing = true;
-      _errorMsg = '';
-      _outputPath = '';
-      _logs.clear();
-      _currentStep = _apiProvider == 'Manual' ? 3 : 1;
-    });
+    final fontDir = await _prepareFontDir();
+    final assPath = await _convertSrtToAss(
+      srtPath: srtPath,
+      outW: outW,
+      outH: outH,
+      subY: subY,
+      subScale: subScale,
+      subColorAss: subColorAss,
+    );
 
-    try {
-      final tempDir = Directory.systemTemp;
-      final audioPath = '${tempDir.path}/tts.mp3';
-      final srtPath = '${tempDir.path}/subs.srt';
+    final outDir = Directory('/storage/emulated/0/Download');
+    final saveFolder = await outDir.exists() ? outDir.path : Directory.systemTemp.path;
+    final outputPath = '$saveFolder/recap_${resolution}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-      String script;
-      if (_apiProvider == 'Manual') {
-        script = _manualScriptCtrl.text.trim();
-        _addLog('Manual: မြန်မာစာသား (စာလုံးရေ ${script.length}) ဖြင့် TTS စတင်ထုတ်နေသည်...');
-      } else if (_apiProvider == 'Hybrid') {
-        _addLog('Groq: အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
-        final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
-        _addLog('Groq: အသံဖတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
+    final buffer = StringBuffer();
 
-        setState(() => _currentStep = 2);
-        script = await GeminiService(geminiKeys).translateToMyanmarRecap(transcript, onLog: _addLog);
-      } else {
-        script = await GeminiService(geminiKeys).generateRecapScript(_videoPath!, onLog: _addLog);
-        setState(() => _currentStep = 2);
+    // အပိုင်းလိုက် Sync Data ပါလာရင် အခန်းတိုင်းကို TTS အသံအချိန်အတိုင်း ရုပ်မြန်/နှေး ချိန်ပြီး ပြန်ဆက်မည်
+    if (syncSegments != null && syncSegments.isNotEmpty) {
+      final int n = syncSegments.length;
+      onLog?.call('FFmpeg ($resolution): အပိုင်း $n ခုလုံးကို TTS အသံအတိုင်း အပိုင်းလိုက် ရုပ်မြန်/နှေး ချိန်ညှိနေသည်...');
+
+      final splitLabels = List.generate(n, (i) => '[in$i]').join();
+      buffer.writeln('[0:v]split=$n$splitLabels;');
+
+      final concatInputs = StringBuffer();
+      for (int i = 0; i < n; i++) {
+        final double rawStart = (syncSegments[i]['vStart'] as num).toDouble();
+        final double vStart = (i == 0) ? 0.0 : rawStart.clamp(0.0, vidDur - 0.1);
+        final double vEnd = (i == n - 1)
+            ? vidDur
+            : (syncSegments[i + 1]['vStart'] as num).toDouble().clamp(vStart + 0.1, vidDur);
+        final double segVidDur = (vEnd - vStart) > 0.1 ? (vEnd - vStart) : 0.1;
+        final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
+        final double ratio = (segAudDur / segVidDur).clamp(0.25, 4.0);
+
+        buffer.writeln(
+          '[in$i]trim=start=${vStart.toStringAsFixed(3)}:end=${vEnd.toStringAsFixed(3)},'
+          'setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)}[seg$i];',
+        );
+        concatInputs.write('[seg$i]');
       }
 
-      setState(() => _currentStep = 3);
-
-      await EdgeTtsService().synthesize(
-        text: script,
-        voice: _voice,
-        ratePercent: _rate.toInt(),
-        pitchHz: _pitch.toInt(),
-        audioOutPath: audioPath,
-        srtOutPath: srtPath,
-        onLog: _addLog,
-      );
-
-      setState(() => _currentStep = 4);
-      final outPath = await FfmpegService().renderRecapVideo(
-        videoPath: _videoPath!,
-        audioPath: audioPath,
-        srtPath: srtPath,
-        blurs: [_blur1, _blur2],
-        subY: _subY,
-        subScale: _subScale,
-        subColorAss: _subColors[_selectedColorIdx]['ass'] as String,
-        resolution: _resolution,
-        onLog: _addLog,
-      );
-
-      _addLog('ပြီးစီးပါပြီ! ဖိုင်သိမ်းပြီး: $outPath');
-      setState(() {
-        _outputPath = outPath;
-        _currentStep = 5;
-      });
-    } catch (e) {
-      _addLog('❌ Error: $e');
-      setState(() => _errorMsg = e.toString());
-    } finally {
-      setState(() => _isProcessing = false);
-    }
-  }
-
-  Widget _sectionCard({required String title, required IconData icon, required Widget child}) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 14),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF181B24),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF262A38)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 18, color: const Color(0xFF00E5FF)),
-              const SizedBox(width: 8),
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-            ],
-          ),
-          const SizedBox(height: 12),
-          child,
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDraggableBlur(BlurBox box, String label, Color color, double maxW, double maxH) {
-    if (!box.enabled) return const SizedBox.shrink();
-    return Positioned(
-      left: box.x * maxW,
-      top: box.y * maxH,
-      width: box.w * maxW,
-      height: box.h * maxH,
-      child: GestureDetector(
-        onPanUpdate: (d) {
-          setState(() {
-            box.x = (box.x + d.delta.dx / maxW).clamp(0.0, 1.0 - box.w);
-            box.y = (box.y + d.delta.dy / maxH).clamp(0.0, 1.0 - box.h);
-          });
-        },
-        child: Container(
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.32),
-            border: Border.all(color: color, width: 2),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Stack(
-            children: [
-              Center(child: Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11))),
-              Positioned(
-                right: 0,
-                bottom: 0,
-                child: GestureDetector(
-                  onPanUpdate: (d) {
-                    setState(() {
-                      box.w = (box.w + d.delta.dx / maxW).clamp(0.1, 1.0 - box.x);
-                      box.h = (box.h + d.delta.dy / maxH).clamp(0.05, 1.0 - box.y);
-                    });
-                  },
-                  child: Container(
-                    width: 22,
-                    height: 22,
-                    decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-                    child: const Icon(Icons.open_in_full, size: 13, color: Colors.white),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDraggableSubtitle(double maxW, double maxH) {
-    final previewColor = _subColors[_selectedColorIdx]['color'] as Color;
-    return Positioned(
-      left: maxW * 0.05,
-      top: (_subY * maxH) - 18,
-      width: maxW * 0.90,
-      height: 36,
-      child: GestureDetector(
-        onVerticalDragUpdate: (d) => setState(() => _subY = (_subY + d.delta.dy / maxH).clamp(0.08, 0.95)),
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.55),
-            border: Border.all(color: previewColor, width: 1.5),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            '↕ မြန်မာစာတန်း (${(_subScale * 100).round()}%)',
-            style: TextStyle(
-              color: previewColor,
-              fontWeight: FontWeight.bold,
-              fontSize: (11 * _subScale).clamp(9.0, 18.0),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStepTile(int stepNum, String title) {
-    Widget icon;
-    if (_currentStep > stepNum || _currentStep == 5) {
-      icon = const Icon(Icons.check_circle, color: Colors.greenAccent, size: 20);
-    } else if (_currentStep == stepNum && (_isProcessing || _isTranscribing)) {
-      icon = const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2.2, color: Color(0xFF00E5FF)));
+      buffer.writeln('${concatInputs.toString()}concat=n=$n:v=1:a=0,scale=$outW:$outH,fps=30[v0];');
     } else {
-      icon = const Icon(Icons.radio_button_unchecked, color: Colors.white30, size: 20);
+      final double ptsRatio = audDur / vidDur;
+      onLog?.call('FFmpeg ($resolution): ${outW}x$outH | မူရင်း ${vidDur.toStringAsFixed(1)}s → အသံ ${audDur.toStringAsFixed(1)}s');
+      buffer.writeln('[0:v]scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsRatio.toStringAsFixed(6)},fps=30[v0];');
     }
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          icon,
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              title,
-              style: TextStyle(
-                fontSize: 13,
-                color: _currentStep >= stepNum ? Colors.white : Colors.white54,
-                fontWeight: _currentStep == stepNum ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF141720),
-        elevation: 0,
-        title: const Row(
-          children: [
-            Icon(Icons.auto_awesome, color: Color(0xFF00E5FF)),
-            SizedBox(width: 8),
-            Text('Myanmar Recap Studio', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-          ],
-        ),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _sectionCard(
-              title: 'API & Script Settings',
-              icon: Icons.key_rounded,
-              child: Column(
-                children: [
-                  DropdownButtonFormField<String>(
-                    value: _apiProvider,
-                    decoration: const InputDecoration(labelText: 'Script စနစ်ရွေးပါ'),
-                    items: const [
-                      DropdownMenuItem(value: 'Manual', child: Text('Manual (Groq နားထောင် → ကိုယ်တိုင်ဘာသာပြန်)')),
-                      DropdownMenuItem(value: 'Hybrid', child: Text('Hybrid (Groq နားထောင် + Gemini ဘာသာပြန်)')),
-                      DropdownMenuItem(value: 'Gemini', child: Text('Google Gemini တစ်ခုတည်း')),
-                    ],
-                    onChanged: (v) => setState(() => _apiProvider = v!),
-                  ),
-                  if (_apiProvider == 'Manual' || _apiProvider == 'Hybrid') ...[
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _groqKeyCtrl,
-                      obscureText: true,
-                      decoration: const InputDecoration(labelText: 'Groq API Key (gsk_...)'),
-                    ),
-                  ],
-                  if (_apiProvider == 'Hybrid' || _apiProvider == 'Gemini') ...[
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _geminiKeysCtrl,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: 'Gemini API Keys (၂-၃ ခု တစ်ကြောင်းတစ်ခုစီ)',
-                        hintText: 'AIzaSy...\nAIzaSy...',
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
+    String currentLabel = 'v0';
+    int idx = 1;
+    for (final b in blurs) {
+      if (!b.enabled) continue;
+      final bx = b.x.clamp(0.0, 0.95).toStringAsFixed(4);
+      final by = b.y.clamp(0.0, 0.95).toStringAsFixed(4);
+      final bw = b.w.clamp(0.05, 1.0 - b.x).toStringAsFixed(4);
+      final bh = b.h.clamp(0.05, 1.0 - b.y).toStringAsFixed(4);
 
-            _sectionCard(
-              title: 'Video, Blur & Subtitle Style',
-              icon: Icons.movie_edit,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: (_isProcessing || _isTranscribing) ? null : _pickVideo,
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      side: const BorderSide(color: Color(0xFF7C4DFF)),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                    icon: const Icon(Icons.video_library, color: Color(0xFF00E5FF)),
-                    label: Text(
-                      _videoPath == null ? 'Gallery မှ ဗီဒီယိုရွေးပါ' : 'ရွေးပြီး: ${_videoPath!.split('/').last}',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    value: _resolution,
-                    decoration: const InputDecoration(labelText: 'Export Resolution (CPU အလိုက်ရွေးပါ)'),
-                    items: const [
-                      DropdownMenuItem(value: '720p', child: Text('720p HD (CPU သက်သာ / ပိုမြန်)')),
-                      DropdownMenuItem(value: '1080p', child: Text('1080p Full HD (ကြည်လင် / CPU ပိုသုံး)')),
-                    ],
-                    onChanged: (v) => setState(() => _resolution = v!),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('စာတန်းအရွယ်အစား (Size)', style: TextStyle(fontSize: 13)),
-                      Text('${(_subScale * 100).round()}%', style: const TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold)),
-                    ],
-                  ),
-                  Slider(
-                    value: _subScale,
-                    min: 0.5,
-                    max: 2.0,
-                    divisions: 15,
-                    onChanged: (v) => setState(() => _subScale = v),
-                  ),
-                  const Text('စာတန်းအရောင် (Color)', style: TextStyle(fontSize: 13)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: List.generate(_subColors.length, (idx) {
-                      final item = _subColors[idx];
-                      final color = item['color'] as Color;
-                      final selected = _selectedColorIdx == idx;
-                      return ChoiceChip(
-                        label: Text(item['name'] as String, style: TextStyle(color: selected ? Colors.black : Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-                        selected: selected,
-                        selectedColor: color,
-                        backgroundColor: const Color(0xFF262A38),
-                        avatar: CircleAvatar(backgroundColor: color, radius: 7),
-                        onSelected: (_) => setState(() => _selectedColorIdx = idx),
-                      );
-                    }),
-                  ),
-                  if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
-                    const SizedBox(height: 12),
-                    Center(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxHeight: 350),
-                          child: AspectRatio(
-                            aspectRatio: _videoCtrl!.value.aspectRatio,
-                            child: LayoutBuilder(
-                              builder: (context, c) => Stack(
-                                children: [
-                                  VideoPlayer(_videoCtrl!),
-                                  _buildDraggableBlur(_blur1, 'Blur 1', Colors.blueAccent, c.maxWidth, c.maxHeight),
-                                  _buildDraggableBlur(_blur2, 'Blur 2', Colors.orangeAccent, c.maxWidth, c.maxHeight),
-                                  _buildDraggableSubtitle(c.maxWidth, c.maxHeight),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        IconButton(
-                          icon: Icon(_videoCtrl!.value.isPlaying ? Icons.pause_circle : Icons.play_circle, size: 36, color: const Color(0xFF00E5FF)),
-                          onPressed: () => setState(() => _videoCtrl!.value.isPlaying ? _videoCtrl!.pause() : _videoCtrl!.play()),
-                        ),
-                        const SizedBox(width: 8),
-                        FilterChip(
-                          label: const Text('Blur 1'),
-                          selected: _blur1.enabled,
-                          selectedColor: Colors.blueAccent.withOpacity(0.4),
-                          onSelected: (v) => setState(() => _blur1.enabled = v),
-                        ),
-                        const SizedBox(width: 8),
-                        FilterChip(
-                          label: const Text('Blur 2'),
-                          selected: _blur2.enabled,
-                          selectedColor: Colors.orangeAccent.withOpacity(0.4),
-                          onSelected: (v) => setState(() => _blur2.enabled = v),
-                        ),
-                      ],
-                    ),
-                  ],
-                ],
-              ),
-            ),
+      final nextLabel = 'v$idx';
+      buffer.writeln(
+        '[$currentLabel]split[m$idx][b$idx];'
+        '[b$idx]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl$idx];'
+        '[m$idx][bl$idx]overlay=W*$bx:H*$by[$nextLabel];',
+      );
+      currentLabel = nextLabel;
+      idx++;
+    }
 
-            if (_apiProvider == 'Manual')
-              _sectionCard(
-                title: 'Manual Script (Groq → ကိုယ်တိုင်ဘာသာပြန်)',
-                icon: Icons.translate_rounded,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: (_isProcessing || _isTranscribing) ? null : _extractTranscriptOnly,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF262A38),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      icon: const Icon(Icons.hearing_rounded, color: Color(0xFF00E5FF)),
-                      label: Text(
-                        _isTranscribing ? 'Groq ဖြင့် နားထောင်နေသည်...' : '🎧 ၁။ Groq ဖြင့် Script ထုတ်မယ်',
-                        style: const TextStyle(color: Colors.white),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _manualScriptCtrl,
-                      maxLines: 6,
-                      decoration: const InputDecoration(
-                        labelText: 'Script / မြန်မာဘာသာပြန်စာသား',
-                        hintText: 'Groq မှထွက်လာသော Script ကို Copy ကူးပြီး ဘာသာပြန်ကာ ဒီနေရာမှာ ပြန် Paste ထည့်ပါ...',
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: _manualScriptCtrl.text));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Script ကို Copy ကူးပြီးပါပြီ'), duration: Duration(seconds: 2)),
-                              );
-                            },
-                            icon: const Icon(Icons.copy, size: 16),
-                            label: const Text('Copy ကူးမယ်'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: () async {
-                              final data = await Clipboard.getData('text/plain');
-                              if (data?.text != null) {
-                                setState(() => _manualScriptCtrl.text = data!.text!);
-                              }
-                            },
-                            icon: const Icon(Icons.paste, size: 16),
-                            label: const Text('Paste ထည့်မယ်'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+    buffer.writeln('[$currentLabel]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
+    buffer.write('[1:a]aresample=async=1:first_pts=0[a_out]');
 
-            _sectionCard(
-              title: 'Edge TTS Voice',
-              icon: Icons.record_voice_over_rounded,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  DropdownButtonFormField<String>(
-                    value: _voice,
-                    decoration: const InputDecoration(labelText: 'အသံရွေးပါ'),
-                    items: const [
-                      DropdownMenuItem(value: 'my-MM-NilarNeural', child: Text('Nilar (အမျိုးသမီး)')),
-                      DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
-                    ],
-                    onChanged: (v) => setState(() => _voice = v!),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [const Text('Speed (Rate)'), Text('${_rate.toInt()}%', style: const TextStyle(color: Color(0xFF00E5FF)))],
-                  ),
-                  Slider(value: _rate, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _rate = v)),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [const Text('Pitch'), Text('${_pitch.toInt()} Hz', style: const TextStyle(color: Color(0xFF00E5FF)))],
-                  ),
-                  Slider(value: _pitch, min: -100, max: 100, divisions: 40, onChanged: (v) => setState(() => _pitch = v)),
-                ],
-              ),
-            ),
+    // Filter ရှည်ရင် Command Error မတက်အောင် ဖိုင်ထဲရေးပြီး -filter_complex_script နဲ့ ခေါ်မည်
+    final filterScriptPath = '${Directory.systemTemp.path}/ffmpeg_filter.txt';
+    await File(filterScriptPath).writeAsString(buffer.toString(), encoding: utf8);
 
-            Container(
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(colors: [Color(0xFF7C4DFF), Color(0xFF00B0FF)]),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: ElevatedButton(
-                onPressed: (_isProcessing || _isTranscribing) ? null : _startRecap,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.transparent,
-                  shadowColor: Colors.transparent,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: Text(
-                  _isProcessing
-                      ? 'လုပ်ဆောင်နေပါသည်...'
-                      : (_apiProvider == 'Manual' ? '🚀 ၂။ TTS နှင့် ဗီဒီယို စတင်ထုတ်မယ်' : '🚀 Recap ဗီဒီယို စတင်ထုတ်မယ်'),
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
-                ),
-              ),
-            ),
+    final presetArgs = resolution == '1080p'
+        ? '-preset veryfast -crf 23 -threads 4'
+        : '-preset ultrafast -crf 26 -threads 2';
 
-            if (_currentStep > 0) ...[
-              const SizedBox(height: 14),
-              _sectionCard(
-                title: 'လုပ်ဆောင်နေသည့် အဆင့်များ',
-                icon: Icons.checklist_rounded,
-                child: Column(
-                  children: [
-                    _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
-                    _buildStepTile(2, '၂။ မြန်မာဘာသာပြန် Script ပြင်ဆင်ခြင်း'),
-                    _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် ၂ ကြောင်းစာတန်းထုတ်ခြင်း'),
-                    _buildStepTile(4, '၄။ $_resolution Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ Sync ပေါင်းထုတ်ခြင်း'),
-                    _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
-                  ],
-                ),
-              ),
-            ],
+    final cmd = '-y -i "$videoPath" -i "$audioPath" '
+        '-filter_complex_script "$filterScriptPath" '
+        '-map "[v_out]" -map "[a_out]" '
+        '-c:v libx264 $presetArgs -pix_fmt yuv420p '
+        '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
 
-            if (_outputPath.isNotEmpty)
-              InkWell(
-                onTap: _openSavedVideoPlayer,
-                borderRadius: BorderRadius.circular(14),
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  margin: const EdgeInsets.only(bottom: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.green.withOpacity(0.18),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.greenAccent, width: 1.5),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.play_circle_fill, color: Colors.greenAccent, size: 40),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('✅ သိမ်းပြီးပါပြီ! နှိပ်ပြီး ဗီဒီယိုကြည့်မယ်', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 14)),
-                            const SizedBox(height: 4),
-                            Text(_outputPath, style: const TextStyle(color: Colors.white70, fontSize: 11)),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+    final session = await FFmpegKit.execute(cmd);
+    final returnCode = await session.getReturnCode();
 
-            if (_logs.isNotEmpty) ...[
-              Container(
-                padding: const EdgeInsets.all(12),
-                margin: const EdgeInsets.only(bottom: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.white12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('📋 Live Log', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 12)),
-                    const SizedBox(height: 6),
-                    ..._logs.map((l) => Text(l, style: const TextStyle(color: Colors.white70, fontSize: 11, fontFamily: 'monospace'))),
-                  ],
-                ),
-              ),
-            ],
+    if (!ReturnCode.isSuccess(returnCode)) {
+      final logs = await session.getAllLogsAsString();
+      throw Exception('FFmpeg Render မအောင်မြင်ပါ:\n$logs');
+    }
 
-            if (_errorMsg.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Text('❌ Error: $_errorMsg', style: const TextStyle(color: Colors.redAccent)),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SavedVideoPlayerDialog extends StatefulWidget {
-  final String videoPath;
-  const _SavedVideoPlayerDialog({required this.videoPath});
-
-  @override
-  State<_SavedVideoPlayerDialog> createState() => _SavedVideoPlayerDialogState();
-}
-
-class _SavedVideoPlayerDialogState extends State<_SavedVideoPlayerDialog> {
-  late VideoPlayerController _ctrl;
-  bool _ready = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = VideoPlayerController.file(File(widget.videoPath))
-      ..initialize().then((_) {
-        setState(() => _ready = true);
-        _ctrl.play();
-      });
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: const Color(0xFF141720),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('Saved Video Preview', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
-              ],
-            ),
-            if (!_ready)
-              const Padding(
-                padding: EdgeInsets.all(40),
-                child: CircularProgressIndicator(),
-              )
-            else ...[
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 420),
-                child: AspectRatio(
-                  aspectRatio: _ctrl.value.aspectRatio,
-                  child: VideoPlayer(_ctrl),
-                ),
-              ),
-              const SizedBox(height: 8),
-              VideoProgressIndicator(_ctrl, allowScrubbing: true, colors: const VideoProgressColors(playedColor: Color(0xFF00E5FF))),
-              IconButton(
-                icon: Icon(_ctrl.value.isPlaying ? Icons.pause_circle : Icons.play_circle, size: 42, color: const Color(0xFF00E5FF)),
-                onPressed: () => setState(() => _ctrl.value.isPlaying ? _ctrl.pause() : _ctrl.play()),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
+    return outputPath;
   }
 }
