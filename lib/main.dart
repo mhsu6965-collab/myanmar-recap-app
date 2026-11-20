@@ -53,8 +53,8 @@ class _RecapHomePageState extends State<RecapHomePage> {
   final _geminiKeysCtrl = TextEditingController();
   final _manualScriptCtrl = TextEditingController();
 
-  // Default ကို Manual (Groq နားထောင် -> ကိုယ်တိုင်ဘာသာပြန် -> TTS) ထားပေးထားပါတယ်
   String _apiProvider = 'Manual';
+  String _resolution = '720p';
 
   String? _videoPath;
   VideoPlayerController? _videoCtrl;
@@ -72,7 +72,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
   bool _isTranscribing = false;
   String _errorMsg = '';
   String _outputPath = '';
-  String _script = '';
   final List<String> _logs = [];
 
   @override
@@ -145,7 +144,15 @@ class _RecapHomePageState extends State<RecapHomePage> {
     }
   }
 
-  // Manual စနစ်အတွက်: Groq Whisper ဖြင့် အသံသက်သက် နားထောင်ပြီး Script ထုတ်ပေးမည်
+  void _openSavedVideoPlayer() {
+    if (_outputPath.isEmpty || !File(_outputPath).existsSync()) return;
+    _videoCtrl?.pause();
+    showDialog(
+      context: context,
+      builder: (_) => _SavedVideoPlayerDialog(videoPath: _outputPath),
+    );
+  }
+
   Future<void> _extractTranscriptOnly() async {
     await _saveKeys();
     if (_videoPath == null) {
@@ -167,7 +174,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
     try {
       _addLog('Groq: ဗီဒီယိုမှ အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
       final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
-      _addLog('Groq: Script ထုတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။ Copy ကူးပြီး ဘာသာပြန်နိုင်ပါပြီ။');
+      _addLog('Groq: Script ထုတ်ပြီးပါပြီ (စာလုံးရေ ${transcript.length})။');
       setState(() {
         _manualScriptCtrl.text = transcript;
         _currentStep = 2;
@@ -195,7 +202,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
         return;
       }
     } else {
-      if ((_apiProvider == 'Hybrid' || _apiProvider == 'Groq') && _groqKeyCtrl.text.trim().isEmpty) {
+      if (_apiProvider == 'Hybrid' && _groqKeyCtrl.text.trim().isEmpty) {
         setState(() => _errorMsg = 'Groq API Key ထည့်ပါ');
         return;
       }
@@ -221,7 +228,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
       String script;
       if (_apiProvider == 'Manual') {
         script = _manualScriptCtrl.text.trim();
-        _addLog('Manual: ထည့်ထားသော မြန်မာစာသား (စာလုံးရေ ${script.length}) ဖြင့် TTS စတင်ထုတ်နေသည်...');
+        _addLog('Manual: မြန်မာစာသား (စာလုံးရေ ${script.length}) ဖြင့် TTS စတင်ထုတ်နေသည်...');
       } else if (_apiProvider == 'Hybrid') {
         _addLog('Groq: အသံခွဲထုတ်ပြီး Whisper ဖြင့် နားထောင်နေသည်...');
         final transcript = await GroqService(_groqKeyCtrl.text.trim()).transcribeAudio(_videoPath!);
@@ -234,10 +241,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
         setState(() => _currentStep = 2);
       }
 
-      setState(() {
-        _script = script;
-        _currentStep = 3;
-      });
+      setState(() => _currentStep = 3);
 
       await EdgeTtsService().synthesize(
         text: script,
@@ -250,13 +254,14 @@ class _RecapHomePageState extends State<RecapHomePage> {
       );
 
       setState(() => _currentStep = 4);
-      _addLog('FFmpeg: CPU ဖြင့် Blur, မြန်မာစာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိနေသည်...');
       final outPath = await FfmpegService().renderRecapVideo(
         videoPath: _videoPath!,
         audioPath: audioPath,
         srtPath: srtPath,
         blurs: [_blur1, _blur2],
         subY: _subY,
+        resolution: _resolution,
+        onLog: _addLog,
       );
 
       _addLog('ပြီးစီးပါပြီ! ဖိုင်သိမ်းပြီး: $outPath');
@@ -361,7 +366,7 @@ class _RecapHomePageState extends State<RecapHomePage> {
             borderRadius: BorderRadius.circular(6),
           ),
           alignment: Alignment.center,
-          child: const Text('↕ မြန်မာစာတန်းထိုးနေရာ', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+          child: const Text('↕ မြန်မာစာတန်း (၂ ကြောင်း)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
         ),
       ),
     );
@@ -473,6 +478,16 @@ class _RecapHomePageState extends State<RecapHomePage> {
                       style: const TextStyle(color: Colors.white),
                     ),
                   ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    value: _resolution,
+                    decoration: const InputDecoration(labelText: 'Export Resolution (CPU အလိုက်ရွေးပါ)'),
+                    items: const [
+                      DropdownMenuItem(value: '720p', child: Text('720p HD (CPU သက်သာ / ပိုမြန်)')),
+                      DropdownMenuItem(value: '1080p', child: Text('1080p Full HD (ကြည်လင် / CPU ပိုသုံး)')),
+                    ],
+                    onChanged: (v) => setState(() => _resolution = v!),
+                  ),
                   if (_videoCtrl != null && _videoCtrl!.value.isInitialized) ...[
                     const SizedBox(height: 12),
                     Center(
@@ -525,7 +540,6 @@ class _RecapHomePageState extends State<RecapHomePage> {
               ),
             ),
 
-            // Manual Mode: Groq ဖြင့် Script ထုတ် -> Copy -> ဘာသာပြန် Paste ပြန်ထည့်
             if (_apiProvider == 'Manual')
               _sectionCard(
                 title: 'Manual Script (Groq → ကိုယ်တိုင်ဘာသာပြန်)',
@@ -650,13 +664,45 @@ class _RecapHomePageState extends State<RecapHomePage> {
                   children: [
                     _buildStepTile(1, '၁။ Groq Whisper ဖြင့် အသံနားထောင်ခြင်း'),
                     _buildStepTile(2, '၂။ မြန်မာဘာသာပြန် Script ပြင်ဆင်ခြင်း'),
-                    _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် စာတန်းထုတ်ခြင်း'),
-                    _buildStepTile(4, '၄။ Blur, စာတန်း နှင့် ရုပ်/အသံ ချိန်ညှိပေါင်းထုတ်ခြင်း'),
+                    _buildStepTile(3, '၃။ Microsoft Edge TTS ဖြင့် အသံနှင့် ၂ ကြောင်းစာတန်းထုတ်ခြင်း'),
+                    _buildStepTile(4, '၄။ $_resolution Blur, မြန်မာ Font နှင့် ရုပ်/အသံ Sync ပေါင်းထုတ်ခြင်း'),
                     _buildStepTile(5, '၅။ ဗီဒီယို အပြီးသတ် သိမ်းဆည်းခြင်း'),
                   ],
                 ),
               ),
             ],
+
+            // Save ပြီးသား ဗီဒီယိုကို နှိပ်ပြီး တန်းကြည့်နိုင်သည့် Card
+            if (_outputPath.isNotEmpty)
+              InkWell(
+                onTap: _openSavedVideoPlayer,
+                borderRadius: BorderRadius.circular(14),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.18),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.greenAccent, width: 1.5),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.play_circle_fill, color: Colors.greenAccent, size: 40),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('✅ သိမ်းပြီးပါပြီ! နှိပ်ပြီး ဗီဒီယိုကြည့်မယ်', style: TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 14)),
+                            const SizedBox(height: 4),
+                            Text(_outputPath, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
 
             if (_logs.isNotEmpty) ...[
               Container(
@@ -678,16 +724,83 @@ class _RecapHomePageState extends State<RecapHomePage> {
               ),
             ],
 
-            if (_outputPath.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Text('✅ ပြီးပါပြီ! သိမ်းထားတဲ့နေရာ:\n$_outputPath', style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold)),
-              ),
             if (_errorMsg.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(bottom: 10),
                 child: Text('❌ Error: $_errorMsg', style: const TextStyle(color: Colors.redAccent)),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SavedVideoPlayerDialog extends StatefulWidget {
+  final String videoPath;
+  const _SavedVideoPlayerDialog({required this.videoPath});
+
+  @override
+  State<_SavedVideoPlayerDialog> createState() => _SavedVideoPlayerDialogState();
+}
+
+class _SavedVideoPlayerDialogState extends State<_SavedVideoPlayerDialog> {
+  late VideoPlayerController _ctrl;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = VideoPlayerController.file(File(widget.videoPath))
+      ..initialize().then((_) {
+        setState(() => _ready = true);
+        _ctrl.play();
+      });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: const Color(0xFF141720),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Saved Video Preview', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+              ],
+            ),
+            if (!_ready)
+              const Padding(
+                padding: EdgeInsets.all(40),
+                child: CircularProgressIndicator(),
+              )
+            else ...[
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 420),
+                child: AspectRatio(
+                  aspectRatio: _ctrl.value.aspectRatio,
+                  child: VideoPlayer(_ctrl),
+                ),
+              ),
+              const SizedBox(height: 8),
+              VideoProgressIndicator(_ctrl, allowScrubbing: true, colors: const VideoProgressColors(playedColor: Color(0xFF00E5FF))),
+              IconButton(
+                icon: Icon(_ctrl.value.isPlaying ? Icons.pause_circle : Icons.play_circle, size: 42, color: const Color(0xFF00E5FF)),
+                onPressed: () => setState(() => _ctrl.value.isPlaying ? _ctrl.pause() : _ctrl.play()),
+              ),
+            ],
           ],
         ),
       ),
