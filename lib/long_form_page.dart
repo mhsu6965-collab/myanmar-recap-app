@@ -8,7 +8,7 @@ import 'services/ffmpeg_service.dart';
 class _PartItem {
   final int partNumber;
   final String rawText;
-  List>? alignedSegments;
+  List? alignedSegments;
   String alignStatus; // pending, aligning, ready, error
   String? alignError;
   bool isRendering;
