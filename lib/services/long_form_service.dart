@@ -10,7 +10,7 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာ (ဥပမာ ၃ မိနစ်) ကို 360p ဖိုင်အသေးဖြတ်ပြီး Gemini ကို ကြည့်ခိုင်းကာ Script + Summary ထုတ်မည်
+  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာကို 240p 1fps (<1MB) အသေးဖြတ်ပြီး Gemini ကို အသေးစိတ် Script ရေးခိုင်းမည်
   Future generateScriptForVideoPart({
     required String videoPath,
     required int partNumber,
@@ -24,10 +24,10 @@ class LongFormService {
     final tempDir = Directory.systemTemp;
     final smallClipPath = '${tempDir.path}/gemini_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    onLog?.call('Part $partNumber/$totalParts: Gemini ကြည့်ဖို့ 360p ဖိုင်အသေး ဖြတ်ထုတ်နေသည်...');
+    onLog?.call('Part $partNumber/$totalParts: ဖိုင်အသေး (240p/1fps) ဖြတ်ထုတ်နေသည်...');
     final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
-        '-vf "scale=-2:360,fps=2" -c:v libx264 -preset ultrafast -crf 32 '
-        '-c:a aac -ar 16000 -ac 1 -b:a 24k -movflags +faststart "$smallClipPath"';
+        '-vf "scale=-2:240,fps=1" -c:v libx264 -preset ultrafast -crf 34 '
+        '-c:a aac -ar 16000 -ac 1 -b:a 16k -movflags +faststart "$smallClipPath"';
 
     final cutSession = await FFmpegKit.execute(cutCmd);
     if (!ReturnCode.isSuccess(await cutSession.getReturnCode())) {
@@ -36,41 +36,47 @@ class LongFormService {
 
     final clipFile = File(smallClipPath);
     final sizeMb = (await clipFile.length()) / (1024 * 1024);
-    onLog?.call('Part $partNumber: ဖိုင်ဆိုဒ် ${sizeMb.toStringAsFixed(1)} MB → Gemini ဆီ ပို့နေသည်...');
+    onLog?.call('Part $partNumber: ဖိုင်ဆိုဒ် ${sizeMb.toStringAsFixed(2)} MB → Gemini ဆီ ပို့နေသည်...');
 
     final base64Video = base64Encode(await clipFile.readAsBytes());
 
+    final int targetMinLines = (chunkDurSec / 8).round().clamp(10, 45);
+    final int targetMaxLines = (chunkDurSec / 5).round().clamp(15, 60);
+
     final contextBlock = previousSummary.trim().isEmpty
-        ? 'This is PART 1 (the beginning of the movie). Introduce the main characters and setting naturally.'
-        : 'PREVIOUS STORY SUMMARY (continue seamlessly from this, keep character names and plot consistent):\n$previousSummary';
+        ? 'This is PART 1 (the beginning of the movie). Introduce the characters and setting clearly.'
+        : 'PREVIOUS STORY SUMMARY (continue seamlessly, keep character names & plot consistent):\n$previousSummary';
 
     final prompt = '''
 You are a professional Burmese movie recap narrator.
-Watch this video clip (PART $partNumber of $totalParts, duration: ${chunkDurSec.toStringAsFixed(0)} seconds) carefully—both visuals and audio.
+Watch this entire video clip (PART $partNumber of $totalParts, exact duration: ${chunkDurSec.toStringAsFixed(0)} seconds) very carefully—every scene, action, expression, and dialogue.
 
 $contextBlock
 
-TASK:
-1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far for the next part>
-2. Then write engaging, natural Burmese movie recap narration synced to the exact scenes in this clip.
-3. Format EVERY narration line strictly as: [start-end] Burmese text
-   (start and end are in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
-4. Example:
+STRICT REQUIREMENTS:
+1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far>
+2. Write VERY DETAILED, engaging Burmese movie recap narration that matches the FULL ${chunkDurSec.toStringAsFixed(0)} seconds duration.
+3. Produce around $targetMinLines to $targetMaxLines detailed lines (roughly 1 rich sentence every 5-8 seconds) so the Burmese voiceover lasts close to ${chunkDurSec.toStringAsFixed(0)} seconds. Do NOT summarize too briefly!
+4. Format EVERY narration line strictly as: [start-end] Burmese text
+   (start and end in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
+5. Example:
 SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
-[0.0-10.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို သတိထားပြီး ဝင်လာခဲ့ပါတယ်။
-[10.5-22.0] ရုတ်တရက် နောက်ကျောကနေ ရန်သူတစ်ယောက် ဓားနဲ့ ဝင်ခုတ်လိုက်တာကြောင့်...
-5. Cover the whole clip chronologically without skipping important scenes. No markdown, no extra explanations.
+[0.0-7.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း သတိကြီးကြီးနဲ့ ဝင်လာခဲ့ပါတယ်။
+[7.5-15.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်တာကြောင့်...
+6. No markdown, no bold text, no extra explanations.
 ''';
 
-    final models = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+    final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
+    final int startKeyIdx = (partNumber - 1) % geminiKeys.length;
     String? lastError;
 
     try {
       for (final model in models) {
-        for (int i = 0; i < geminiKeys.length; i++) {
-          final key = geminiKeys[i];
+        for (int k = 0; k < geminiKeys.length; k++) {
+          final keyIdx = (startKeyIdx + k) % geminiKeys.length;
+          final key = geminiKeys[keyIdx];
           for (int attempt = 1; attempt <= 2; attempt++) {
-            onLog?.call('Part $partNumber/$totalParts → $model | Key ${i + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
+            onLog?.call('Part $partNumber/$totalParts → $model | Key ${keyIdx + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
             try {
               final uri = Uri.parse(
                 'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
@@ -93,10 +99,10 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
                           ]
                         }
                       ],
-                      'generationConfig': {'temperature': 0.3},
+                      'generationConfig': {'temperature': 0.35},
                     }),
                   )
-                  .timeout(const Duration(seconds: 90));
+                  .timeout(const Duration(seconds: 120));
 
               if (res.statusCode == 200) {
                 final json = jsonDecode(res.body);
@@ -110,7 +116,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
 
                   final segments = parseAlignedSegments(out, offsetSec: chunkStartSec);
                   if (segments.isNotEmpty) {
-                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ခန်း)။');
+                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ကြောင်း)။');
                     return {
                       'segments': segments,
                       'summary': newSummary,
@@ -122,16 +128,16 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
               lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
               if (res.statusCode == 404) break;
               if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
-                onLog?.call('⏳ Server ကျပ်နေသည် (${res.statusCode}) → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
-                await Future.delayed(const Duration(seconds: 5));
+                onLog?.call('⏳ Limit/Server ကျပ်နေသည် (${res.statusCode}) → ၈ စက္ကန့်စောင့်နေသည်...');
+                await Future.delayed(const Duration(seconds: 8));
                 continue;
               }
               break;
             } catch (e) {
               lastError = e.toString();
               if (attempt == 1) {
-                onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၃ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
-                await Future.delayed(const Duration(seconds: 3));
+                onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+                await Future.delayed(const Duration(seconds: 5));
                 continue;
               }
             }
@@ -249,7 +255,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     return assPath;
   }
 
-  // ၂။ Part တစ်ခုချင်းစီကို Continuous 6s Play + 3s Freeze & Zoom In/Out + Mirror + Blur + Subtitle ဖြင့် Render ထုတ်မည်
+  // ၂။ Part Render ထုတ်မည် (Gallery ထဲ ၁ ပုဒ်တည်းပဲ ရောက်အောင် tempDir ထဲ အရင်ထုတ်ပြီးမှ Gal.putVideo ခေါ်မည်)
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -314,7 +320,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     final presetFast = '-preset ultrafast -crf 25 -threads 2';
     int clipCounter = 0;
     bool zoomInToggle = true;
-    double playAcc = 0.0; // 6s Play ပြည့်/မပြည့် ဆက်တိုက်မှတ်ထားမည်
+    double playAcc = 0.0;
 
     for (int i = 0; i < syncSegments.length; i++) {
       final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
@@ -401,9 +407,8 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
       throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
     }
 
-    final outDir = Directory('/storage/emulated/0/Download');
-    final saveFolder = await outDir.exists() ? outDir.path : tempDir.path;
-    final outputPath = '$saveFolder/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    // tempDir ထဲ အရင်သိမ်းမည် (Gallery ထဲ ၂ ပုဒ်ထပ်မရောက်အောင်)
+    final outputPath = '${tempDir.path}/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
     final filterBuf = StringBuffer();
     String currentV = '0:v';
@@ -494,9 +499,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     final listFile = File('${tempDir.path}/merge_all_parts.txt');
     await listFile.writeAsString(listBuf.toString());
 
-    final outDir = Directory('/storage/emulated/0/Download');
-    final saveFolder = await outDir.exists() ? outDir.path : tempDir.path;
-    final mergedPath = '$saveFolder/YouTube_LongRecap_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final mergedPath = '${tempDir.path}/YouTube_LongRecap_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
     onLog?.call('Part ${partPaths.length} ခုလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းနေသည်...');
     final session = await FFmpegKit.execute(
