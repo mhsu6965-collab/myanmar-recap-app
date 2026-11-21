@@ -114,9 +114,9 @@ class _LongFormPageState extends State<LongFormPage> {
 
   Future<void> _pickVideo() async {
     setState(() => _errorMsg = '');
-    final result = await FilePicker.platform.pickFiles(type: FileType.video);
-    if (result != null && result.files.single.path != null) {
-      final path = result.files.single.path!;
+    final file = await FilePicker.pickFile(type: FileType.video);
+  if (file != null && file.path != null) {
+    final path = file.path!;
       setState(() {
         _videoPath = path;
         _videoPreviewImg = null;
@@ -145,22 +145,20 @@ class _LongFormPageState extends State<LongFormPage> {
   }
 
   Future<void> _pickTxt() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['txt'],
-    );
-    if (result != null && result.files.single.path != null) {
-      setState(() => _txtPath = result.files.single.path);
-    }
+    final file = await FilePicker.pickFile(
+    type: FileType.custom,
+    allowedExtensions: ['txt'],
+  );
+  if (file != null && file.path != null) {
+    setState(() => _txtPath = file.path);
   }
-
   Future<void> _pickBgm() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.audio);
     if (result != null && result.files.single.path != null) {
-      setState(() => _bgmPath = result.files.single.path);
-    }
+      final file = await FilePicker.pickFile(type: FileType.audio);
+  if (file != null && file.path != null) {
+    setState(() => _bgmPath = file.path);
   }
-
   // ၁။ Groq ဖတ်ပြီး Script ကို အပိုင်းခွဲကာ Part 1 မှစ၍ တစ်ပိုင်းချင်း Gemini တွဲမည်
   Future<void> _prepareParts() async {
     await _loadSavedKeys();
