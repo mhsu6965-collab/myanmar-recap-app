@@ -198,7 +198,10 @@ $chunkText
     throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
   }
 
-  List> parseAlignedSegments(String alignedScript) {
+  List parseAlignedSegments(String alignedScript) {
+  final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
+  final lines = alignedScript.split(RegExp(r'\r?\n'));
+  final List segments = [];
     final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
     final lines = alignedScript.split(RegExp(r'\r?\n'));
     final List> segments = [];
