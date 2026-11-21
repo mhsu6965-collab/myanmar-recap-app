@@ -75,68 +75,70 @@ class LongFormService {
       }
     }
 
-    onLog?.call('Groq Timestamp အားလုံး ဖတ်ပြီးပါပြီ။');
+    onLog?.call('✅ Groq Timestamp အားလုံး ဖတ်ပြီးပါပြီ။');
     return buffer.toString().trim();
   }
 
-  // ၂။ မြန်မာ .txt Script ကို ၈ မိနစ်စာ အပိုင်းလိုက်ခွဲပြီး Gemini (3.8 / 3.5) ဖြင့် တစ်ပိုင်းချင်း အချိန်တွဲမည်
-  Future<String> alignScriptWithGemini({
-    required String groqTimestamps,
-    required String myanmarTxtScript,
-    required List<String> geminiKeys,
-    Function(String)? onLog,
-  }) async {
+  // ၂။ မြန်မာ .txt Script ကို မိနစ်အလိုက် (ဥပမာ ၈ မိနစ်စာ) အပိုင်းခွဲပေးမည် (နောက်ဆုံးအပိုင်း မပြည့်လည်း ကျန်သလောက် ယူမည်)
+  List<String> splitScriptIntoRawChunks(String myanmarTxtScript, int minutesPerPart) {
     final paragraphs = myanmarTxtScript
         .split(RegExp(r'\r?\n'))
         .where((l) => l.trim().isNotEmpty)
         .toList();
 
-    final List<String> scriptChunks = [];
+    final int targetChars = minutesPerPart * 650;
+    final List<String> chunks = [];
     final buf = StringBuffer();
+
     for (final p in paragraphs) {
-      if (buf.length + p.length > 5000 && buf.isNotEmpty) {
-        scriptChunks.add(buf.toString().trim());
+      if (buf.length + p.length > targetChars && buf.isNotEmpty) {
+        chunks.add(buf.toString().trim());
         buf.clear();
       }
       buf.writeln(p.trim());
     }
     if (buf.isNotEmpty) {
-      scriptChunks.add(buf.toString().trim());
+      chunks.add(buf.toString().trim());
     }
+    return chunks;
+  }
 
-    onLog?.call('Script ကို စုစုပေါင်း ${scriptChunks.length} ပိုင်းခွဲပြီး တစ်ပိုင်းချင်း အချိန်တွဲပါမည်...');
-
-    final models = ['gemini-3.8-flash', 'gemini-3.5-flash'];
-    final allAligned = StringBuffer();
-
-    for (int c = 0; c < scriptChunks.length; c++) {
-      final chunkText = scriptChunks[c];
-      final prompt = '''
+  // ၃။ အပိုင်းတစ်ပိုင်းတည်းကို Gemini (3.8 / 3.5) ဖြင့် အချိန်တွဲပေးမည် (503 ဖြစ်ရင် ၅ စက္ကန့်စောင့်ပြီး Auto-Retry)
+  Future<List>> alignSingleChunkWithGemini({
+    required String groqTimestamps,
+    required String chunkText,
+    required int partNumber,
+    required int totalParts,
+    required List<String> geminiKeys,
+    Function(String)? onLog,
+  }) async {
+    final prompt = '''
 You are a professional movie recap editor.
-Below is the full timestamped transcript of a video in [start-end] format (in seconds), followed by PART ${c + 1} of ${scriptChunks.length} of the user's Myanmar recap script.
+Below is the full timestamped transcript of a video in [start-end] format (in seconds), followed by PART $partNumber of $totalParts of the user's Myanmar recap script.
 Match EVERY line of this Myanmar script part to its accurate [start-end] time range from the video transcript in chronological order.
 
 STRICT RULES:
 1. Output ONLY lines in this exact format: [start-end] Myanmar text
 2. Example: [12.5-35.0] မင်းသားက မြို့ထဲကို ရောက်လာပြီး...
 3. Do NOT change, shorten, or omit the user's Myanmar text.
-4. No explanations, no markdown, no extra headers.
+4. Ensure start < end and timestamps progress forward chronologically.
+5. No explanations, no markdown, no extra headers.
 
 === VIDEO TRANSCRIPT ===
 $groqTimestamps
 
-=== MYANMAR SCRIPT (PART ${c + 1}/${scriptChunks.length}) ===
+=== MYANMAR SCRIPT (PART $partNumber/$totalParts) ===
 $chunkText
 ''';
 
-      String? chunkResult;
-      String? lastError;
+    final models = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+    String? lastError;
 
-      for (final model in models) {
-        if (chunkResult != null) break;
-        for (int i = 0; i < geminiKeys.length; i++) {
-          final key = geminiKeys[i];
-          onLog?.call('အပိုင်း (${c + 1}/${scriptChunks.length}) → $model | Key (${i + 1}/${geminiKeys.length})...');
+    for (final model in models) {
+      for (int i = 0; i < geminiKeys.length; i++) {
+        final key = geminiKeys[i];
+        for (int attempt = 1; attempt <= 2; attempt++) {
+          onLog?.call('Part $partNumber/$totalParts → $model | Key ${i + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
           try {
             final uri = Uri.parse(
               'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
@@ -162,66 +164,56 @@ $chunkText
               final json = jsonDecode(res.body);
               final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
               if (out != null && out.isNotEmpty) {
-                chunkResult = out;
-                onLog?.call('✅ အပိုင်း (${c + 1}/${scriptChunks.length}) တွဲပြီးပါပြီ။');
-                break;
+                final parsed = parseAlignedSegments(out);
+                if (parsed.isNotEmpty) {
+                  onLog?.call('✅ Part $partNumber/$totalParts ($model) တွဲပြီးပါပြီ (${parsed.length} ကြောင်း)။');
+                  return parsed;
+                }
               }
             }
+
             lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
-            if (res.statusCode == 404) break;
+            if (res.statusCode == 404) {
+              break; // Model မရှိရင် ဒီ Key နဲ့ ထပ်မစမ်းတော့ဘူး
+            }
+            if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
+              onLog?.call('⏳ Server ကျပ်နေသည် (${res.statusCode}) → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+              await Future.delayed(const Duration(seconds: 5));
+              continue;
+            }
+            break;
           } catch (e) {
             lastError = e.toString();
-            onLog?.call('⚠️ $model နှေး/မရပါ → နောက်တစ်ခု ပြောင်းစမ်းနေသည်...');
+            if (attempt == 1) {
+              onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၃ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+              await Future.delayed(const Duration(seconds: 3));
+              continue;
+            }
           }
         }
+        if (lastError != null && lastError.contains('HTTP 404')) break;
       }
-
-      if (chunkResult == null) {
-        throw Exception('အပိုင်း ${c + 1} မအောင်မြင်ပါ: $lastError');
-      }
-      allAligned.writeln(chunkResult);
     }
 
-    return allAligned.toString().trim();
+    throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
   }
 
-  // ၃။ [start-end] Script ကို Part 1, Part 2, Part 3... အပိုင်းခွဲပေးမည်
-  List splitIntoParts(String alignedScript, int minutesPerPart) {
+  List> parseAlignedSegments(String alignedScript) {
     final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
     final lines = alignedScript.split(RegExp(r'\r?\n'));
-    final allSegments = [];
+    final List> segments = [];
 
     for (final line in lines) {
       final m = regex.firstMatch(line.trim());
       if (m != null) {
-        allSegments.add({
+        segments.add({
           'vStart': double.parse(m.group(1)!),
           'vEnd': double.parse(m.group(2)!),
           'text': m.group(3)!.trim(),
         });
       }
     }
-
-    if (allSegments.isEmpty) return [];
-
-    final int targetChars = minutesPerPart * 650;
-    final parts = [];
-    final currentPart = [];
-    int charCount = 0;
-
-    for (final seg in allSegments) {
-      currentPart.add(seg);
-      charCount += (seg['text'] as String).length;
-      if (charCount >= targetChars) {
-        parts.add(List.from(currentPart));
-        currentPart.clear();
-        charCount = 0;
-      }
-    }
-    if (currentPart.isNotEmpty) {
-      parts.add(currentPart);
-    }
-    return parts;
+    return segments;
   }
 
   Future<String> _prepareFontDir() async {
@@ -306,7 +298,7 @@ $chunkText
     return assPath;
   }
 
-  // ၄။ Part တစ်ခုချင်းစီကို Speed + Play / Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
+  // ၄။ Part တစ်ခုချင်းစီကို Speed + Play / Freeze & Zoom In/Out + Blur + Mirror + Subtitle ဖြင့် Render ထုတ်မည်
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -325,6 +317,7 @@ $chunkText
     required String subColorAss,
     required bool enableBlur,
     required BlurBox blurBox,
+    bool enableMirror = false,
     String? bgmPath,
     double bgmVolume = 0.15,
     bool saveToGallery = true,
@@ -474,6 +467,11 @@ $chunkText
         '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
       );
       currentV = 'v_blur';
+    }
+
+    if (enableMirror) {
+      filterBuf.writeln('[$currentV]hflip[v_flip];');
+      currentV = 'v_flip';
     }
 
     if (enableSubtitles) {
