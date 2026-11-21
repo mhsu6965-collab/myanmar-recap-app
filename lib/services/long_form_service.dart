@@ -79,7 +79,7 @@ class LongFormService {
     return buffer.toString().trim();
   }
 
-  // ၂။ မြန်မာ .txt Script ကို Groq Timestamp နှင့် Gemini သုံးပြီး [start-end] တွဲပေးမည်
+  // ၂။ မြန်မာ .txt Script ကို Groq Timestamp နှင့် Gemini (3.8 / 3.5) သုံးပြီး [start-end] တွဲပေးမည်
   Future<String> alignScriptWithGemini({
     required String groqTimestamps,
     required String myanmarTxtScript,
@@ -150,6 +150,7 @@ $myanmarTxtScript
       }
     }
     throw Exception('Gemini 3.8 / 3.5 အားလုံး မအောင်မြင်ပါ: $lastError');
+  }
 
   // ၃။ [start-end] Script ကို Part 1, Part 2, Part 3... အပိုင်းခွဲပေးမည်
   List splitIntoParts(String alignedScript, int minutesPerPart) {
@@ -356,14 +357,12 @@ $myanmarTxtScript
         }
         clipListBuf.writeln("file '$clipPath'");
       } else {
-        // Copyright-Safe Mode: Speed (0.6x) ဖြင့် 6s Play → 3s Freeze & Zoom In/Out
         onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Speed ${videoSpeed}x + Freeze/Zoom]...');
         double remaining = segAudDur;
         double curSrcPos = vStart;
         final double ptsMult = 1.0 / videoSpeed.clamp(0.4, 1.0);
 
         while (remaining > 0.15) {
-          // (က) Play Clip (အများဆုံး playSec စက္ကန့်)
           final double playDur = remaining >= playSec ? playSec : remaining;
           final double srcNeeded = playDur * videoSpeed;
           if (curSrcPos + srcNeeded > vEnd) {
@@ -384,7 +383,6 @@ $myanmarTxtScript
           curSrcPos += srcNeeded;
           remaining -= playDur;
 
-          // (ခ) ကျန်အချိန်ရှိသေးရင် Freeze + Zoom In/Out (အများဆုံး freezeSec စက္ကန့်)
           if (remaining > 0.4) {
             final double fDur = remaining >= freezeSec ? freezeSec : remaining;
             final int totalFrames = (fDur * 30).round().clamp(15, 300);
