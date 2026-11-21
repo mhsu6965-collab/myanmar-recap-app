@@ -105,44 +105,51 @@ $groqTimestamps
 $myanmarTxtScript
 ''';
 
-    String? lastError;
-    for (int i = 0; i < geminiKeys.length; i++) {
-      final key = geminiKeys[i];
-      onLog?.call('Gemini Key (${i + 1}/${geminiKeys.length}) ဖြင့် Script နှင့် အချိန်တွဲနေသည်...');
-      try {
-        final uri = Uri.parse(
-          'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$key',
-        );
-        final res = await http.post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'contents': [
-              {
-                'parts': [
-                  {'text': prompt}
-                ]
-              }
-            ],
-            'generationConfig': {'temperature': 0.2},
-          }),
-        );
+    final models = [
+      'gemini-3.8-flash',
+      'gemini-3.5-flash',
+    ];
 
-        if (res.statusCode == 200) {
-          final json = jsonDecode(res.body);
-          final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
-          if (out != null && out.isNotEmpty) {
-            onLog?.call('Gemini: Script နှင့် ဗီဒီယိုအချိန် တွဲပြီးပါပြီ။');
-            return out;
+    String? lastError;
+    for (final model in models) {
+      for (int i = 0; i < geminiKeys.length; i++) {
+        final key = geminiKeys[i];
+        onLog?.call('$model | Key (${i + 1}/${geminiKeys.length}) ဖြင့် စမ်းနေသည်...');
+        try {
+          final uri = Uri.parse(
+            'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
+          );
+          final res = await http.post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'contents': [
+                {
+                  'parts': [
+                    {'text': prompt}
+                  ]
+                }
+              ],
+              'generationConfig': {'temperature': 0.2},
+            }),
+          );
+
+          if (res.statusCode == 200) {
+            final json = jsonDecode(res.body);
+            final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
+            if (out != null && out.isNotEmpty) {
+              onLog?.call('✅ $model ဖြင့် Script နှင့် အချိန်တွဲပြီးပါပြီ။');
+              return out;
+            }
           }
+          lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
+          if (res.statusCode == 404) break;
+        } catch (e) {
+          lastError = e.toString();
         }
-        lastError = 'HTTP ${res.statusCode}: ${res.body}';
-      } catch (e) {
-        lastError = e.toString();
       }
     }
-    throw Exception('Gemini Key အားလုံး မအောင်မြင်ပါ: $lastError');
-  }
+    throw Exception('Gemini 3.8 / 3.5 အားလုံး မအောင်မြင်ပါ: $lastError');
 
   // ၃။ [start-end] Script ကို Part 1, Part 2, Part 3... အပိုင်းခွဲပေးမည်
   List splitIntoParts(String alignedScript, int minutesPerPart) {
