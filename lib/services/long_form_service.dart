@@ -10,204 +10,156 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ 1hr+ ဗီဒီယိုမှ 16kHz Mono MP3 (ဖိုင်သေး ~10-15MB) ခွဲထုတ်ပြီး Groq ဖြင့် Timestamp ယူမည်
-  Future<String> extractLongTimestamps({
+  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာ (ဥပမာ ၃ မိနစ်) ကို 360p ဖိုင်အသေးဖြတ်ပြီး Gemini ကို ကြည့်ခိုင်းကာ Script + Summary ထုတ်မည်
+  Future generateScriptForVideoPart({
     required String videoPath,
-    required String groqApiKey,
-    Function(String)? onLog,
-  }) async {
-    final tempDir = Directory.systemTemp;
-    final audioPath = '${tempDir.path}/long_16k_${DateTime.now().millisecondsSinceEpoch}.mp3';
-
-    onLog?.call('16kHz Mono အသံဖိုင်အသေး ခွဲထုတ်နေသည် (1hr+ ဗီဒီယိုအတွက်)...');
-    final session = await FFmpegKit.execute(
-      '-y -i "$videoPath" -vn -ar 16000 -ac 1 -b:a 24k "$audioPath"',
-    );
-    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('ဗီဒီယိုမှ အသံခွဲထုတ်မရပါ');
-    }
-
-    final fileSizeMb = (await File(audioPath).length()) / (1024 * 1024);
-    onLog?.call('အသံဖိုင်ဆိုဒ်: ${fileSizeMb.toStringAsFixed(1)} MB → Groq Whisper ဆီ ပို့နေသည်...');
-
-    final req = http.MultipartRequest(
-      'POST',
-      Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions'),
-    )
-      ..headers['Authorization'] = 'Bearer $groqApiKey'
-      ..fields['model'] = 'whisper-large-v3-turbo'
-      ..fields['response_format'] = 'verbose_json'
-      ..files.add(await http.MultipartFile.fromPath('file', audioPath));
-
-    final res = await http.Response.fromStream(await req.send());
-    if (res.statusCode != 200) {
-      throw Exception('Groq Whisper မအောင်မြင်ပါ: ${res.body}');
-    }
-
-    final data = jsonDecode(res.body);
-    final List rawSegments = data['segments'] ?? [];
-    if (rawSegments.isEmpty) {
-      throw Exception('ဗီဒီယိုထဲတွင် စကားပြောအသံ မတွေ့ပါ');
-    }
-
-    final buffer = StringBuffer();
-    double? groupStart;
-    double groupEnd = 0.0;
-    final groupText = StringBuffer();
-
-    for (int i = 0; i < rawSegments.length; i++) {
-      final seg = rawSegments[i];
-      final double start = (seg['start'] as num).toDouble();
-      final double end = (seg['end'] as num).toDouble();
-      final String text = seg['text'].toString().trim();
-      if (text.isEmpty) continue;
-
-      groupStart ??= start;
-      groupEnd = end;
-      if (groupText.isNotEmpty) groupText.write(' ');
-      groupText.write(text);
-
-      final isLast = i == rawSegments.length - 1;
-      if ((groupEnd - groupStart) >= 15.0 || isLast) {
-        buffer.writeln('[${groupStart.toStringAsFixed(1)}-${groupEnd.toStringAsFixed(1)}] ${groupText.toString().trim()}');
-        groupStart = null;
-        groupText.clear();
-      }
-    }
-
-    onLog?.call('✅ Groq Timestamp အားလုံး ဖတ်ပြီးပါပြီ။');
-    return buffer.toString().trim();
-  }
-
-  // ၂။ မြန်မာ .txt Script ကို မိနစ်အလိုက် (ဥပမာ ၈ မိနစ်စာ) အပိုင်းခွဲပေးမည် (နောက်ဆုံးအပိုင်း မပြည့်လည်း ကျန်သလောက် ယူမည်)
-  List<String> splitScriptIntoRawChunks(String myanmarTxtScript, int minutesPerPart) {
-    final paragraphs = myanmarTxtScript
-        .split(RegExp(r'\r?\n'))
-        .where((l) => l.trim().isNotEmpty)
-        .toList();
-
-    final int targetChars = minutesPerPart * 650;
-    final List<String> chunks = [];
-    final buf = StringBuffer();
-
-    for (final p in paragraphs) {
-      if (buf.length + p.length > targetChars && buf.isNotEmpty) {
-        chunks.add(buf.toString().trim());
-        buf.clear();
-      }
-      buf.writeln(p.trim());
-    }
-    if (buf.isNotEmpty) {
-      chunks.add(buf.toString().trim());
-    }
-    return chunks;
-  }
-
-  // ၃။ အပိုင်းတစ်ပိုင်းတည်းကို Gemini (3.8 / 3.5) ဖြင့် အချိန်တွဲပေးမည် (503 ဖြစ်ရင် ၅ စက္ကန့်စောင့်ပြီး Auto-Retry)
-  Future<List> alignSingleChunkWithGemini({
-    required String groqTimestamps,
-    required String chunkText,
     required int partNumber,
     required int totalParts,
+    required double chunkStartSec,
+    required double chunkDurSec,
+    required String previousSummary,
     required List<String> geminiKeys,
     Function(String)? onLog,
   }) async {
+    final tempDir = Directory.systemTemp;
+    final smallClipPath = '${tempDir.path}/gemini_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+
+    onLog?.call('Part $partNumber/$totalParts: Gemini ကြည့်ဖို့ 360p ဖိုင်အသေး ဖြတ်ထုတ်နေသည်...');
+    final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
+        '-vf "scale=-2:360,fps=2" -c:v libx264 -preset ultrafast -crf 32 '
+        '-c:a aac -ar 16000 -ac 1 -b:a 24k -movflags +faststart "$smallClipPath"';
+
+    final cutSession = await FFmpegKit.execute(cutCmd);
+    if (!ReturnCode.isSuccess(await cutSession.getReturnCode())) {
+      throw Exception('Part $partNumber ဗီဒီယိုဖြတ်ထုတ်မရပါ');
+    }
+
+    final clipFile = File(smallClipPath);
+    final sizeMb = (await clipFile.length()) / (1024 * 1024);
+    onLog?.call('Part $partNumber: ဖိုင်ဆိုဒ် ${sizeMb.toStringAsFixed(1)} MB → Gemini ဆီ ပို့နေသည်...');
+
+    final base64Video = base64Encode(await clipFile.readAsBytes());
+
+    final contextBlock = previousSummary.trim().isEmpty
+        ? 'This is PART 1 (the beginning of the movie). Introduce the main characters and setting naturally.'
+        : 'PREVIOUS STORY SUMMARY (continue seamlessly from this, keep character names and plot consistent):\n$previousSummary';
+
     final prompt = '''
-You are a professional movie recap editor.
-Below is the full timestamped transcript of a video in [start-end] format (in seconds), followed by PART $partNumber of $totalParts of the user's Myanmar recap script.
-Match EVERY line of this Myanmar script part to its accurate [start-end] time range from the video transcript in chronological order.
+You are a professional Burmese movie recap narrator.
+Watch this video clip (PART $partNumber of $totalParts, duration: ${chunkDurSec.toStringAsFixed(0)} seconds) carefully—both visuals and audio.
 
-STRICT RULES:
-1. Output ONLY lines in this exact format: [start-end] Myanmar text
-2. Example: [12.5-35.0] မင်းသားက မြို့ထဲကို ရောက်လာပြီး...
-3. Do NOT change, shorten, or omit the user's Myanmar text.
-4. Ensure start < end and timestamps progress forward chronologically.
-5. No explanations, no markdown, no extra headers.
+$contextBlock
 
-=== VIDEO TRANSCRIPT ===
-$groqTimestamps
-
-=== MYANMAR SCRIPT (PART $partNumber/$totalParts) ===
-$chunkText
+TASK:
+1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far for the next part>
+2. Then write engaging, natural Burmese movie recap narration synced to the exact scenes in this clip.
+3. Format EVERY narration line strictly as: [start-end] Burmese text
+   (start and end are in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
+4. Example:
+SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
+[0.0-10.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို သတိထားပြီး ဝင်လာခဲ့ပါတယ်။
+[10.5-22.0] ရုတ်တရက် နောက်ကျောကနေ ရန်သူတစ်ယောက် ဓားနဲ့ ဝင်ခုတ်လိုက်တာကြောင့်...
+5. Cover the whole clip chronologically without skipping important scenes. No markdown, no extra explanations.
 ''';
 
     final models = ['gemini-3.8-flash', 'gemini-3.5-flash'];
     String? lastError;
 
-    for (final model in models) {
-      for (int i = 0; i < geminiKeys.length; i++) {
-        final key = geminiKeys[i];
-        for (int attempt = 1; attempt <= 2; attempt++) {
-          onLog?.call('Part $partNumber/$totalParts → $model | Key ${i + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
-          try {
-            final uri = Uri.parse(
-              'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
-            );
-            final res = await http
-                .post(
-                  uri,
-                  headers: {'Content-Type': 'application/json'},
-                  body: jsonEncode({
-                    'contents': [
-                      {
-                        'parts': [
-                          {'text': prompt}
-                        ]
-                      }
-                    ],
-                    'generationConfig': {'temperature': 0.2},
-                  }),
-                )
-                .timeout(const Duration(seconds: 60));
+    try {
+      for (final model in models) {
+        for (int i = 0; i < geminiKeys.length; i++) {
+          final key = geminiKeys[i];
+          for (int attempt = 1; attempt <= 2; attempt++) {
+            onLog?.call('Part $partNumber/$totalParts → $model | Key ${i + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
+            try {
+              final uri = Uri.parse(
+                'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
+              );
+              final res = await http
+                  .post(
+                    uri,
+                    headers: {'Content-Type': 'application/json'},
+                    body: jsonEncode({
+                      'contents': [
+                        {
+                          'parts': [
+                            {
+                              'inline_data': {
+                                'mime_type': 'video/mp4',
+                                'data': base64Video,
+                              }
+                            },
+                            {'text': prompt}
+                          ]
+                        }
+                      ],
+                      'generationConfig': {'temperature': 0.3},
+                    }),
+                  )
+                  .timeout(const Duration(seconds: 90));
 
-            if (res.statusCode == 200) {
-              final json = jsonDecode(res.body);
-              final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
-              if (out != null && out.isNotEmpty) {
-                final parsed = parseAlignedSegments(out);
-                if (parsed.isNotEmpty) {
-                  onLog?.call('✅ Part $partNumber/$totalParts ($model) တွဲပြီးပါပြီ (${parsed.length} ကြောင်း)။');
-                  return parsed;
+              if (res.statusCode == 200) {
+                final json = jsonDecode(res.body);
+                final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
+                if (out != null && out.isNotEmpty) {
+                  String newSummary = previousSummary;
+                  final summaryMatch = RegExp(r'^SUMMARY:\s*(.+)$', multiLine: true).firstMatch(out);
+                  if (summaryMatch != null) {
+                    newSummary = summaryMatch.group(1)!.trim();
+                  }
+
+                  final segments = parseAlignedSegments(out, offsetSec: chunkStartSec);
+                  if (segments.isNotEmpty) {
+                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ခန်း)။');
+                    return {
+                      'segments': segments,
+                      'summary': newSummary,
+                    };
+                  }
                 }
               }
-            }
 
-            lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
-            if (res.statusCode == 404) {
-              break; // Model မရှိရင် ဒီ Key နဲ့ ထပ်မစမ်းတော့ဘူး
-            }
-            if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
-              onLog?.call('⏳ Server ကျပ်နေသည် (${res.statusCode}) → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
-              await Future.delayed(const Duration(seconds: 5));
-              continue;
-            }
-            break;
-          } catch (e) {
-            lastError = e.toString();
-            if (attempt == 1) {
-              onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၃ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
-              await Future.delayed(const Duration(seconds: 3));
-              continue;
+              lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
+              if (res.statusCode == 404) break;
+              if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
+                onLog?.call('⏳ Server ကျပ်နေသည် (${res.statusCode}) → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+                await Future.delayed(const Duration(seconds: 5));
+                continue;
+              }
+              break;
+            } catch (e) {
+              lastError = e.toString();
+              if (attempt == 1) {
+                onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၃ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+                await Future.delayed(const Duration(seconds: 3));
+                continue;
+              }
             }
           }
+          if (lastError != null && lastError.contains('HTTP 404')) break;
         }
-        if (lastError != null && lastError.contains('HTTP 404')) break;
       }
+      throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
+    } finally {
+      try {
+        if (await clipFile.exists()) await clipFile.delete();
+      } catch (_) {}
     }
-
-    throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
   }
 
-  List parseAlignedSegments(String alignedScript) {
-  final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
-  final lines = alignedScript.split(RegExp(r'\r?\n'));
-  final List segments = [];
+  List parseAlignedSegments(String alignedScript, {double offsetSec = 0.0}) {
+    final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
+    final lines = alignedScript.split(RegExp(r'\r?\n'));
+    final List segments = [];
+
     for (final line in lines) {
       final m = regex.firstMatch(line.trim());
       if (m != null) {
+        final s = double.parse(m.group(1)!) + offsetSec;
+        final e = double.parse(m.group(2)!) + offsetSec;
         segments.add({
-          'vStart': double.parse(m.group(1)!),
-          'vEnd': double.parse(m.group(2)!),
+          'vStart': s,
+          'vEnd': e > s ? e : s + 3.0,
           'text': m.group(3)!.trim(),
         });
       }
@@ -297,7 +249,7 @@ $chunkText
     return assPath;
   }
 
-  // ၄။ Part တစ်ခုချင်းစီကို Speed + Play / Freeze & Zoom In/Out + Blur + Mirror + Subtitle ဖြင့် Render ထုတ်မည်
+  // ၂။ Part တစ်ခုချင်းစီကို Continuous 6s Play + 3s Freeze & Zoom In/Out + Mirror + Blur + Subtitle ဖြင့် Render ထုတ်မည်
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -362,6 +314,7 @@ $chunkText
     final presetFast = '-preset ultrafast -crf 25 -threads 2';
     int clipCounter = 0;
     bool zoomInToggle = true;
+    double playAcc = 0.0; // 6s Play ပြည့်/မပြည့် ဆက်တိုက်မှတ်ထားမည်
 
     for (int i = 0; i < syncSegments.length; i++) {
       final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
@@ -382,20 +335,18 @@ $chunkText
         }
         clipListBuf.writeln("file '$clipPath'");
       } else {
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Speed ${videoSpeed}x + Freeze/Zoom]...');
+        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Speed ${videoSpeed}x + 6s/3s Freeze]...');
         double remaining = segAudDur;
         double curSrcPos = vStart;
         final double ptsMult = 1.0 / videoSpeed.clamp(0.4, 1.0);
 
         while (remaining > 0.15) {
-          final double playDur = remaining >= playSec ? playSec : remaining;
+          final double needPlay = (playSec - playAcc).clamp(0.2, playSec);
+          final double playDur = remaining < needPlay ? remaining : needPlay;
           final double srcNeeded = playDur * videoSpeed;
-          if (curSrcPos + srcNeeded > vEnd) {
-            curSrcPos = vStart;
-          }
 
           final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-          final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.2).toStringAsFixed(3)} -i "$videoPath" '
+          final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.25).toStringAsFixed(3)} -i "$videoPath" '
               '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
               '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
 
@@ -407,8 +358,9 @@ $chunkText
 
           curSrcPos += srcNeeded;
           remaining -= playDur;
+          playAcc += playDur;
 
-          if (remaining > 0.4) {
+          if (playAcc >= playSec - 0.05 && remaining > 0.35) {
             final double fDur = remaining >= freezeSec ? freezeSec : remaining;
             final int totalFrames = (fDur * 30).round().clamp(15, 300);
             final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
@@ -432,6 +384,7 @@ $chunkText
               clipListBuf.writeln("file '$freezePath'");
               remaining -= fDur;
             }
+            playAcc = 0.0;
           }
         }
       }
@@ -528,7 +481,7 @@ $chunkText
     return outputPath;
   }
 
-  // ၅။ Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
+  // ၃။ Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
   Future<String> mergeAllParts({
     required List<String> partPaths,
     Function(String)? onLog,
