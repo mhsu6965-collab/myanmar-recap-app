@@ -8,19 +8,23 @@ import 'services/ffmpeg_service.dart';
 
 class _PartItem {
   final int partNumber;
-  final String rawText;
+  final double startSec;
+  final double durSec;
   List? alignedSegments;
-  String alignStatus; // pending, aligning, ready, error
-  String? alignError;
+  String summary;
+  String status; // pending, generating, ready, error
+  String? errorText;
   bool isRendering;
   String? outputPath;
 
   _PartItem({
     required this.partNumber,
-    required this.rawText,
+    required this.startSec,
+    required this.durSec,
     this.alignedSegments,
-    this.alignStatus = 'pending',
-    this.alignError,
+    this.summary = '',
+    this.status = 'pending',
+    this.errorText,
     this.isRendering = false,
     this.outputPath,
   });
@@ -34,24 +38,18 @@ class LongFormPage extends StatefulWidget {
 }
 
 class _LongFormPageState extends State<LongFormPage> {
-  String _groqKey = '';
   String _geminiKeysRaw = '';
-  final _groqCtrl = TextEditingController();
   final _geminiCtrl = TextEditingController();
 
   String? _videoPath;
   VideoPlayerController? _videoController;
   double _videoAspect = 16 / 9;
+  double _videoTotalSec = 0.0;
 
-  String? _txtPath;
   String? _bgmPath;
 
-  // Groq Cache
-  String? _cachedGroqTimestamps;
-  String? _cachedVideoPath;
-
   // Settings
-  int _minutesPerPart = 8;
+  int _minutesPerPart = 3;
   bool _enableCopyrightSafe = true;
   double _videoSpeed = 0.65;
   final double _playSec = 6.0;
@@ -77,7 +75,7 @@ class _LongFormPageState extends State<LongFormPage> {
   final int _ttsPitch = 0;
   String _resolution = '720p';
 
-  bool _isAligningAll = false;
+  bool _isGeneratingAll = false;
   bool _isMerging = false;
   String _errorMsg = '';
   final List<String> _logs = [];
@@ -92,38 +90,31 @@ class _LongFormPageState extends State<LongFormPage> {
   @override
   void dispose() {
     _videoController?.dispose();
-    _groqCtrl.dispose();
     _geminiCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _loadSavedKeys() async {
     final prefs = await SharedPreferences.getInstance();
-    final g = (prefs.getString('groq_key') ?? prefs.getString('groq_api_key') ?? '').trim();
     final gem = (prefs.getString('gemini_keys') ?? prefs.getString('gemini_api_keys') ?? '').trim();
     setState(() {
-      _groqKey = g;
       _geminiKeysRaw = gem;
-      _groqCtrl.text = g;
       _geminiCtrl.text = gem;
     });
   }
 
   Future<void> _saveKeys() async {
     final prefs = await SharedPreferences.getInstance();
-    final g = _groqCtrl.text.trim();
     final gem = _geminiCtrl.text.trim();
-    await prefs.setString('groq_key', g);
     await prefs.setString('gemini_keys', gem);
     setState(() {
-      _groqKey = g;
       _geminiKeysRaw = gem;
       _errorMsg = '';
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('✅ API Keys များ သိမ်းဆည်းပြီးပါပြီ!'),
+          content: Text('✅ Gemini API Keys သိမ်းဆည်းပြီးပါပြီ!'),
           backgroundColor: Colors.green,
         ),
       );
@@ -158,10 +149,8 @@ class _LongFormPageState extends State<LongFormPage> {
 
       setState(() {
         _videoPath = path;
-        if (_cachedVideoPath != path) {
-          _cachedGroqTimestamps = null;
-          _cachedVideoPath = null;
-        }
+        _videoTotalSec = 0.0;
+        _parts.clear();
       });
 
       try {
@@ -174,21 +163,12 @@ class _LongFormPageState extends State<LongFormPage> {
           setState(() {
             _videoController = ctrl;
             _videoAspect = ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (16 / 9);
+            _videoTotalSec = ctrl.value.duration.inMilliseconds / 1000.0;
           });
         }
       } catch (e) {
         _addLog('⚠️ Preview ဖွင့်မရပါ: $e');
       }
-    }
-  }
-
-  Future<void> _pickTxt() async {
-    final file = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: ['txt'],
-    );
-    if (file != null && file.path != null) {
-      setState(() => _txtPath = file.path);
     }
   }
 
@@ -199,92 +179,103 @@ class _LongFormPageState extends State<LongFormPage> {
     }
   }
 
-  Future<void> _prepareParts() async {
+  // ၁။ ဗီဒီယိုကို ၃ မိနစ်စီခွဲပြီး Gemini ကို တစ်ပိုင်းချင်း ကြည့်ခိုင်းကာ Script ထုတ်မည်
+  Future<void> _startVideoAutoRecap() async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
 
-    if (_groqKey.isEmpty || geminiKeys.isEmpty) {
-      setState(() => _errorMsg = 'အပေါ်က API Keys အကွက်မှာ Groq Key နှင့် Gemini Key ထည့်ပြီး Save နှိပ်ပါ');
+    if (geminiKeys.isEmpty) {
+      setState(() => _errorMsg = 'အပေါ်က အကွက်မှာ Gemini API Key ထည့်ပြီး Save နှိပ်ပါ');
       return;
     }
-    if (_videoPath == null || _txtPath == null) {
-      setState(() => _errorMsg = 'ဗီဒီယိုဖိုင် နှင့် မြန်မာ Script (.txt) ကို ရွေးပေးပါ');
+    if (_videoPath == null) {
+      setState(() => _errorMsg = 'ဗီဒီယိုဖိုင်ကို အရင်ရွေးပေးပါ');
       return;
     }
 
     setState(() {
-      _isAligningAll = true;
+      _isGeneratingAll = true;
       _errorMsg = '';
       _logs.clear();
       _parts.clear();
     });
 
     try {
-      final svc = LongFormService();
-      final txtContent = await File(_txtPath!).readAsString();
-      final rawChunks = svc.splitScriptIntoRawChunks(txtContent, _minutesPerPart);
-
-      if (rawChunks.isEmpty) {
-        throw Exception('Script ဖိုင်ထဲတွင် စာသားမရှိပါ');
+      double totalSec = _videoTotalSec;
+      if (totalSec <= 0) {
+        totalSec = await FfmpegService().getDuration(_videoPath!);
+      }
+      if (totalSec <= 1.0) {
+        throw Exception('ဗီဒီယိုအရှည် ဖတ်၍မရပါ');
       }
 
-      setState(() {
-        for (int i = 0; i < rawChunks.length; i++) {
-          _parts.add(_PartItem(partNumber: i + 1, rawText: rawChunks[i]));
-        }
-      });
-      _addLog('Script ကို စုစုပေါင်း ${rawChunks.length} ပိုင်း ခွဲပြီးပါပြီ။');
+      final double chunkLen = _minutesPerPart * 60.0;
+      final List<_PartItem> newParts = [];
+      double cursor = 0.0;
+      int pNum = 1;
 
-      if (_cachedGroqTimestamps == null || _cachedVideoPath != _videoPath) {
-        final ts = await svc.extractLongTimestamps(
-          videoPath: _videoPath!,
-          groqApiKey: _groqKey,
-          onLog: _addLog,
-        );
-        _cachedGroqTimestamps = ts;
-        _cachedVideoPath = _videoPath;
-      } else {
-        _addLog('⚡ သိမ်းထားပြီးသား Groq Timestamp ကို ပြန်သုံးပါမည်။');
+      while (cursor < totalSec - 1.0) {
+        final double remaining = totalSec - cursor;
+        final double dur = remaining >= chunkLen ? chunkLen : remaining;
+        newParts.add(_PartItem(partNumber: pNum++, startSec: cursor, durSec: dur));
+        cursor += dur;
       }
+
+      setState(() => _parts.addAll(newParts));
+      _addLog('ဗီဒီယို (${(totalSec / 60).toStringAsFixed(1)} မိနစ်) ကို စုစုပေါင်း ${_parts.length} ပိုင်း ခွဲပြီးပါပြီ။');
 
       for (int i = 0; i < _parts.length; i++) {
-        await _alignSinglePart(i, geminiKeys);
+        await _generateSinglePart(i, geminiKeys);
       }
     } catch (e) {
       setState(() => _errorMsg = e.toString());
       _addLog('❌ $e');
     } finally {
-      if (mounted) setState(() => _isAligningAll = false);
+      if (mounted) setState(() => _isGeneratingAll = false);
     }
   }
 
-  Future<void> _alignSinglePart(int index, List<String> geminiKeys) async {
+  String _getPreviousSummary(int index) {
+    for (int i = index - 1; i >= 0; i--) {
+      if (_parts[i].summary.trim().isNotEmpty) {
+        return _parts[i].summary.trim();
+      }
+    }
+    return '';
+  }
+
+  Future<void> _generateSinglePart(int index, List<String> geminiKeys) async {
     final item = _parts[index];
     setState(() {
-      item.alignStatus = 'aligning';
-      item.alignError = null;
+      item.status = 'generating';
+      item.errorText = null;
     });
 
     try {
-      final segments = await LongFormService().alignSingleChunkWithGemini(
-        groqTimestamps: _cachedGroqTimestamps!,
-        chunkText: item.rawText,
+      final prevSummary = _getPreviousSummary(index);
+      final result = await LongFormService().generateScriptForVideoPart(
+        videoPath: _videoPath!,
         partNumber: item.partNumber,
         totalParts: _parts.length,
+        chunkStartSec: item.startSec,
+        chunkDurSec: item.durSec,
+        previousSummary: prevSummary,
         geminiKeys: geminiKeys,
         onLog: _addLog,
       );
+
       if (mounted) {
         setState(() {
-          item.alignedSegments = segments;
-          item.alignStatus = 'ready';
+          item.alignedSegments = result['segments'] as List;
+          item.summary = (result['summary'] ?? '').toString();
+          item.status = 'ready';
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          item.alignStatus = 'error';
-          item.alignError = e.toString();
+          item.status = 'error';
+          item.errorText = e.toString();
         });
       }
       _addLog('❌ Part ${item.partNumber} မအောင်မြင်ပါ (Retry ပြန်နှိပ်နိုင်သည်)');
@@ -294,11 +285,11 @@ class _LongFormPageState extends State<LongFormPage> {
   Future<void> _retryPart(int index) async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
-    if (_cachedGroqTimestamps == null || geminiKeys.isEmpty) {
-      setState(() => _errorMsg = 'Key သို့မဟုတ် Groq Timestamp မရှိပါ');
+    if (geminiKeys.isEmpty) {
+      setState(() => _errorMsg = 'Gemini API Key မရှိပါ');
       return;
     }
-    await _alignSinglePart(index, geminiKeys);
+    await _generateSinglePart(index, geminiKeys);
   }
 
   Future<void> _renderSinglePart(int index) async {
@@ -369,6 +360,10 @@ class _LongFormPageState extends State<LongFormPage> {
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     if (d.inHours > 0) return '${d.inHours}:$m:$s';
     return '$m:$s';
+  }
+
+  String _formatSecRange(double start, double dur) {
+    return '${_formatDur(Duration(seconds: start.round()))} - ${_formatDur(Duration(seconds: (start + dur).round()))}';
   }
 
   Widget _buildInteractivePreview() {
@@ -582,7 +577,7 @@ class _LongFormPageState extends State<LongFormPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Long-Form YouTube Studio (1hr+)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        title: const Text('Long-Form AI Video Studio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
         backgroundColor: const Color(0xFF12141C),
       ),
       body: SingleChildScrollView(
@@ -591,18 +586,9 @@ class _LongFormPageState extends State<LongFormPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildCard(
-              title: '🔑 API Keys (Groq နှင့် Gemini)',
+              title: '🔑 Gemini API Keys (Script မလို / ဗီဒီယိုတိုက်ရိုက်ကြည့်မယ်)',
               icon: Icons.vpn_key_rounded,
               children: [
-                TextField(
-                  controller: _groqCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Groq API Key (gsk_...)',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                ),
-                const SizedBox(height: 8),
                 TextField(
                   controller: _geminiCtrl,
                   maxLines: 2,
@@ -626,30 +612,21 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: '၁။ ဗီဒီယို နှင့် မြန်မာ Script (.txt) ရွေးပါ',
+              title: '၁။ ဗီဒီယို နှင့် BGM ရွေးပါ',
               icon: Icons.video_library_rounded,
               children: [
                 OutlinedButton.icon(
-                  onPressed: _isAligningAll ? null : _pickVideo,
+                  onPressed: _isGeneratingAll ? null : _pickVideo,
                   icon: const Icon(Icons.movie_creation_outlined, color: Colors.lightBlueAccent),
                   label: Text(
-                    _videoPath == null ? '၁ နာရီစာ ဗီဒီယို ရွေးမယ်' : '✅ ${_videoPath!.split('/').last}',
+                    _videoPath == null ? 'ဗီဒီယိုဖိုင် ရွေးမယ် (1hr+ ရသည်)' : '✅ ${_videoPath!.split('/').last}',
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
                 _buildInteractivePreview(),
                 const SizedBox(height: 8),
                 OutlinedButton.icon(
-                  onPressed: _isAligningAll ? null : _pickTxt,
-                  icon: const Icon(Icons.description, color: Colors.amberAccent),
-                  label: Text(
-                    _txtPath == null ? 'မြန်မာ Script (.txt) ရွေးမယ်' : '✅ ${_txtPath!.split('/').last}',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                OutlinedButton.icon(
-                  onPressed: _isAligningAll ? null : _pickBgm,
+                  onPressed: _isGeneratingAll ? null : _pickBgm,
                   icon: const Icon(Icons.music_note, color: Colors.pinkAccent),
                   label: Text(
                     _bgmPath == null ? 'BGM သီချင်း (မထည့်လည်းရသည်)' : '🎵 ${_bgmPath!.split('/').last}',
@@ -659,20 +636,19 @@ class _LongFormPageState extends State<LongFormPage> {
                 const SizedBox(height: 10),
                 DropdownButtonFormField<int>(
                   value: _minutesPerPart,
-                  decoration: const InputDecoration(labelText: 'အပိုင်းတစ်ပိုင်း အရှည်', border: OutlineInputBorder()),
+                  decoration: const InputDecoration(labelText: 'Gemini ဆီ ပို့မည့် အပိုင်းအရှည်', border: OutlineInputBorder()),
                   items: const [
-                    DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲထုတ်မယ် (ဖုန်းအပေါ့ဆုံး)')),
-                    DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲထုတ်မယ်')),
-                    DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲထုတ်မယ်')),
-                    DropdownMenuItem(value: 10, child: Text('၁၀ မိနစ်စီ ခွဲထုတ်မယ်')),
+                    DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲပို့မယ် (အကောင်းဆုံး / Limit သက်သာ)')),
+                    DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲပို့မယ်')),
+                    DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲပို့မယ်')),
                   ],
-                  onChanged: _isAligningAll ? null : (v) => setState(() => _minutesPerPart = v ?? 8),
+                  onChanged: _isGeneratingAll ? null : (v) => setState(() => _minutesPerPart = v ?? 3),
                 ),
               ],
             ),
 
             _buildCard(
-              title: '၂။ Copyright-Safe Edit (Mirror + Speed + Freeze/Zoom)',
+              title: '၂။ Copyright-Safe Edit (Mirror + Speed + 6s/3s Freeze)',
               icon: Icons.shield_rounded,
               children: [
                 SwitchListTile(
@@ -719,7 +695,7 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: '၃။ Edge TTS နှင့် Resolution',
+              title: '၃။ Edge TTS နှင့် Output Resolution',
               icon: Icons.record_voice_over_rounded,
               children: [
                 DropdownButtonFormField<String>(
@@ -748,7 +724,7 @@ class _LongFormPageState extends State<LongFormPage> {
                 ),
                 DropdownButtonFormField<String>(
                   value: _resolution,
-                  decoration: const InputDecoration(labelText: 'Resolution', border: OutlineInputBorder()),
+                  decoration: const InputDecoration(labelText: 'Render ထုတ်မည့် Resolution', border: OutlineInputBorder()),
                   items: const [
                     DropdownMenuItem(value: '720p', child: Text('720p HD (မြန် / CPU သက်သာ)')),
                     DropdownMenuItem(value: '1080p', child: Text('1080p Full HD')),
@@ -765,10 +741,10 @@ class _LongFormPageState extends State<LongFormPage> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              onPressed: _isAligningAll ? null : _prepareParts,
+              onPressed: _isGeneratingAll ? null : _startVideoAutoRecap,
               icon: const Icon(Icons.auto_awesome),
               label: Text(
-                _isAligningAll ? 'အပိုင်းများ တွဲနေပါသည်...' : '⚡ ၁။ AI ဖြင့် အချိန်တွဲပြီး Part များ ခွဲမယ်',
+                _isGeneratingAll ? 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...' : '⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်',
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
@@ -790,7 +766,7 @@ class _LongFormPageState extends State<LongFormPage> {
                         border: Border.all(
                           color: item.outputPath != null
                               ? Colors.greenAccent.withOpacity(0.5)
-                              : item.alignStatus == 'error'
+                              : item.status == 'error'
                                   ? Colors.redAccent.withOpacity(0.6)
                                   : const Color(0xFF262A38),
                         ),
@@ -802,31 +778,31 @@ class _LongFormPageState extends State<LongFormPage> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'Part ${item.partNumber}',
+                                  'Part ${item.partNumber} (${_formatSecRange(item.startSec, item.durSec)})',
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                                 ),
                                 const SizedBox(height: 2),
-                                if (item.alignStatus == 'pending')
+                                if (item.status == 'pending')
                                   const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
-                                else if (item.alignStatus == 'aligning')
-                                  const Text('✨ Gemini အချိန်တွဲနေသည်...', style: TextStyle(fontSize: 11, color: Colors.amberAccent))
-                                else if (item.alignStatus == 'error')
+                                else if (item.status == 'generating')
+                                  const Text('👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...', style: TextStyle(fontSize: 11, color: Colors.amberAccent))
+                                else if (item.status == 'error')
                                   const Text('❌ မအောင်မြင်ပါ (Retry ပြန်နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
                                 else if (item.outputPath != null)
                                   const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
                                 else
-                                  Text('🟢 အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ခန်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                                  Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ခန်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
                               ],
                             ),
                           ),
-                          if (item.alignStatus == 'error')
+                          if (item.status == 'error')
                             ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
                               onPressed: () => _retryPart(i),
                               icon: const Icon(Icons.refresh, size: 16),
                               label: const Text('Retry', style: TextStyle(fontSize: 12)),
                             )
-                          else if (item.alignStatus == 'ready')
+                          else if (item.status == 'ready')
                             ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: item.outputPath != null ? Colors.green : Colors.blueAccent,
