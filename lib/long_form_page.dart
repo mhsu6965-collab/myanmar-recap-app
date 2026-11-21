@@ -35,6 +35,8 @@ class LongFormPage extends StatefulWidget {
 class _LongFormPageState extends State<LongFormPage> {
   String _groqKey = '';
   String _geminiKeysRaw = '';
+  final _groqCtrl = TextEditingController();
+  final _geminiCtrl = TextEditingController();
 
   String? _videoPath;
   String? _videoPreviewImg;
@@ -88,10 +90,35 @@ class _LongFormPageState extends State<LongFormPage> {
 
   Future<void> _loadSavedKeys() async {
     final prefs = await SharedPreferences.getInstance();
+    final g = (prefs.getString('groq_key') ?? prefs.getString('groq_api_key') ?? '').trim();
+    final gem = (prefs.getString('gemini_keys') ?? prefs.getString('gemini_api_keys') ?? '').trim();
     setState(() {
-      _groqKey = (prefs.getString('groq_key') ?? prefs.getString('groq_api_key') ?? '').trim();
-      _geminiKeysRaw = (prefs.getString('gemini_keys') ?? prefs.getString('gemini_api_keys') ?? '').trim();
+      _groqKey = g;
+      _geminiKeysRaw = gem;
+      _groqCtrl.text = g;
+      _geminiCtrl.text = gem;
     });
+  }
+
+  Future<void> _saveKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final g = _groqCtrl.text.trim();
+    final gem = _geminiCtrl.text.trim();
+    await prefs.setString('groq_key', g);
+    await prefs.setString('gemini_keys', gem);
+    setState(() {
+      _groqKey = g;
+      _geminiKeysRaw = gem;
+      _errorMsg = '';
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ API Keys များ သိမ်းဆည်းပြီးပါပြီ!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    }
   }
 
   List<String> _parseGeminiKeys() {
@@ -491,6 +518,39 @@ class _LongFormPageState extends State<LongFormPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildCard(
+              title: '🔑 API Keys (Groq နှင့် Gemini)',
+              icon: Icons.vpn_key_rounded,
+              children: [
+                TextField(
+                  controller: _groqCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Groq API Key (gsk_...)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _geminiCtrl,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Gemini API Keys (တစ်ခုထက်ပိုရင် Enter ခေါက်ထည့်ပါ)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _saveKeys,
+                  icon: const Icon(Icons.save_rounded, size: 18),
+                  label: const Text('💾 API Keys သိမ်းမယ် (Save)'),
+                ),
+              ],
+            ),
               title: '၁။ ဗီဒီယို နှင့် မြန်မာ Script (.txt) ရွေးပါ',
               icon: Icons.video_library_rounded,
               children: [
