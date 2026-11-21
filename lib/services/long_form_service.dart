@@ -202,10 +202,6 @@ $chunkText
   final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
   final lines = alignedScript.split(RegExp(r'\r?\n'));
   final List segments = [];
-    final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
-    final lines = alignedScript.split(RegExp(r'\r?\n'));
-    final List> segments = [];
-
     for (final line in lines) {
       final m = regex.firstMatch(line.trim());
       if (m != null) {
