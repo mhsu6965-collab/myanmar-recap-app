@@ -12,6 +12,7 @@ class _PartItem {
   final double durSec;
   List? alignedSegments;
   String summary;
+  String tailLines;
   String status; // pending, generating, ready, error
   String? errorText;
   bool isRendering;
@@ -23,6 +24,7 @@ class _PartItem {
     required this.durSec,
     this.alignedSegments,
     this.summary = '',
+    this.tailLines = '',
     this.status = 'pending',
     this.errorText,
     this.isRendering = false,
@@ -77,6 +79,8 @@ class _LongFormPageState extends State<LongFormPage> {
   String _resolution = '720p';
 
   bool _isGeneratingAll = false;
+  bool _stopRequested = false;
+  int _cooldownSec = 0;
   bool _isMerging = false;
   String _errorMsg = '';
   final List<String> _logs = [];
@@ -193,7 +197,8 @@ class _LongFormPageState extends State<LongFormPage> {
     );
   }
 
-  Future<void> _startVideoAutoRecap() async {
+  // ၁။ ဗီဒီယိုခွဲပြီး (သို့) ရပ်ထားတဲ့အပိုင်းကနေ ပြန်ဆက်ပြီး 25s Cooldown ဖြင့် Script ထုတ်မည်
+  Future<void> _startOrResumeAutoRecap({bool freshStart = false}) async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
 
@@ -208,44 +213,78 @@ class _LongFormPageState extends State<LongFormPage> {
 
     setState(() {
       _isGeneratingAll = true;
+      _stopRequested = false;
+      _cooldownSec = 0;
       _errorMsg = '';
-      _mergedOutputPath = null;
-      _logs.clear();
-      _parts.clear();
+      if (freshStart) {
+        _mergedOutputPath = null;
+        _logs.clear();
+        _parts.clear();
+      }
     });
 
     try {
-      double totalSec = _videoTotalSec;
-      if (totalSec <= 0) {
-        totalSec = await FfmpegService().getDuration(_videoPath!);
-      }
-      if (totalSec <= 1.0) {
-        throw Exception('ဗီဒီယိုအရှည် ဖတ်၍မရပါ');
-      }
+      if (_parts.isEmpty) {
+        double totalSec = _videoTotalSec;
+        if (totalSec <= 0) {
+          totalSec = await FfmpegService().getDuration(_videoPath!);
+        }
+        if (totalSec <= 1.0) {
+          throw Exception('ဗီဒီယိုအရှည် ဖတ်၍မရပါ');
+        }
 
-      final double chunkLen = _minutesPerPart * 60.0;
-      final List<_PartItem> newParts = [];
-      double cursor = 0.0;
-      int pNum = 1;
+        final double chunkLen = _minutesPerPart * 60.0;
+        final List<_PartItem> newParts = [];
+        double cursor = 0.0;
+        int pNum = 1;
 
-      while (cursor < totalSec - 1.0) {
-        final double remaining = totalSec - cursor;
-        final double dur = remaining >= chunkLen ? chunkLen : remaining;
-        newParts.add(_PartItem(partNumber: pNum++, startSec: cursor, durSec: dur));
-        cursor += dur;
+        while (cursor < totalSec - 1.0) {
+          final double remaining = totalSec - cursor;
+          final double dur = remaining >= chunkLen ? chunkLen : remaining;
+          newParts.add(_PartItem(partNumber: pNum++, startSec: cursor, durSec: dur));
+          cursor += dur;
+        }
+
+        setState(() => _parts.addAll(newParts));
+        _addLog('ဗီဒီယို (${(totalSec / 60).toStringAsFixed(1)} မိနစ်) ကို စုစုပေါင်း ${_parts.length} ပိုင်း ခွဲပြီးပါပြီ။');
       }
-
-      setState(() => _parts.addAll(newParts));
-      _addLog('ဗီဒီယို (${(totalSec / 60).toStringAsFixed(1)} မိနစ်) ကို စုစုပေါင်း ${_parts.length} ပိုင်း ခွဲပြီးပါပြီ။');
 
       for (int i = 0; i < _parts.length; i++) {
-        await _generateSinglePart(i, geminiKeys);
+        if (_stopRequested) {
+          _addLog('⏹️ အသုံးပြုသူမှ ခဏရပ်လိုက်ပါသည်။');
+          break;
+        }
+        if (_parts[i].status == 'ready') continue;
+
+        final ok = await _generateSinglePart(i, geminiKeys);
+        if (!ok) {
+          // Error တက်ရင် နောက်အပိုင်းကျော်မသွားဘဲ ချက်ချင်းရပ်မည် (ဇာတ်လမ်းအဆက်အစပ် မပြတ်စေရန်)
+          _addLog('🛑 Part ${_parts[i].partNumber} မအောင်မြင်၍ ခဏရပ်ထားပါသည်။ ခဏစောင့်ပြီး "ဆက်ထုတ်မယ်" နှိပ်ပါ။');
+          break;
+        }
+
+        // နောက်အပိုင်းကျန်သေးရင် Limit မထိအောင် ၂၅ စက္ကန့် နားပေးမည်
+        final hasMore = _parts.sublist(i + 1).any((p) => p.status != 'ready');
+        if (hasMore && !_stopRequested) {
+          _addLog('⏳ Limit မထိအောင် ၂၅ စက္ကန့် နားနေပါသည်...');
+          for (int sec = 25; sec > 0; sec--) {
+            if (_stopRequested || !mounted) break;
+            setState(() => _cooldownSec = sec);
+            await Future.delayed(const Duration(seconds: 1));
+          }
+          if (mounted) setState(() => _cooldownSec = 0);
+        }
       }
     } catch (e) {
       setState(() => _errorMsg = e.toString());
       _addLog('❌ $e');
     } finally {
-      if (mounted) setState(() => _isGeneratingAll = false);
+      if (mounted) {
+        setState(() {
+          _isGeneratingAll = false;
+          _cooldownSec = 0;
+        });
+      }
     }
   }
 
@@ -258,7 +297,16 @@ class _LongFormPageState extends State<LongFormPage> {
     return '';
   }
 
-  Future<void> _generateSinglePart(int index, List<String> geminiKeys) async {
+  String _getPreviousTailLines(int index) {
+    for (int i = index - 1; i >= 0; i--) {
+      if (_parts[i].tailLines.trim().isNotEmpty) {
+        return _parts[i].tailLines.trim();
+      }
+    }
+    return '';
+  }
+
+  Future<bool> _generateSinglePart(int index, List<String> geminiKeys) async {
     final item = _parts[index];
     setState(() {
       item.status = 'generating';
@@ -267,6 +315,7 @@ class _LongFormPageState extends State<LongFormPage> {
 
     try {
       final prevSummary = _getPreviousSummary(index);
+      final prevTail = _getPreviousTailLines(index);
       final result = await LongFormService().generateScriptForVideoPart(
         videoPath: _videoPath!,
         partNumber: item.partNumber,
@@ -274,6 +323,7 @@ class _LongFormPageState extends State<LongFormPage> {
         chunkStartSec: item.startSec,
         chunkDurSec: item.durSec,
         previousSummary: prevSummary,
+        previousTailLines: prevTail,
         geminiKeys: geminiKeys,
         onLog: _addLog,
       );
@@ -282,9 +332,11 @@ class _LongFormPageState extends State<LongFormPage> {
         setState(() {
           item.alignedSegments = result['segments'] as List;
           item.summary = (result['summary'] ?? '').toString();
+          item.tailLines = (result['tailLines'] ?? '').toString();
           item.status = 'ready';
         });
       }
+      return true;
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -292,7 +344,8 @@ class _LongFormPageState extends State<LongFormPage> {
           item.errorText = e.toString();
         });
       }
-      _addLog('❌ Part ${item.partNumber} မအောင်မြင်ပါ (Retry ပြန်နှိပ်နိုင်သည်)');
+      _addLog('❌ Part ${item.partNumber} မအောင်မြင်ပါ: $e');
+      return false;
     }
   }
 
@@ -591,6 +644,7 @@ class _LongFormPageState extends State<LongFormPage> {
   @override
   Widget build(BuildContext context) {
     final completedCount = _parts.where((p) => p.outputPath != null).length;
+    final hasUnfinishedParts = _parts.isNotEmpty && _parts.any((p) => p.status != 'ready');
 
     return Scaffold(
       appBar: AppBar(
@@ -603,7 +657,7 @@ class _LongFormPageState extends State<LongFormPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildCard(
-              title: '🔑 Gemini API Keys (Script မလို / ဗီဒီယိုတိုက်ရိုက်ကြည့်မယ်)',
+              title: '🔑 Gemini API Keys (25s Cooldown / Limit သက်သာ)',
               icon: Icons.vpn_key_rounded,
               children: [
                 TextField(
@@ -665,7 +719,7 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: '၂။ Copyright-Safe Edit (Mirror + Speed + 6s/3s Freeze)',
+              title: '၂။ Copyright-Safe Edit (Scene-Locked Sync + Mirror)',
               icon: Icons.shield_rounded,
               children: [
                 SwitchListTile(
@@ -676,7 +730,7 @@ class _LongFormPageState extends State<LongFormPage> {
                 ),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('6s Play + 3s Freeze & Zoom In/Out ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
+                  title: const Text('Scene-Locked Speed + Freeze/Zoom ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
                   value: _enableCopyrightSafe,
                   onChanged: (v) => setState(() => _enableCopyrightSafe = v),
                 ),
@@ -751,20 +805,69 @@ class _LongFormPageState extends State<LongFormPage> {
               ],
             ),
 
-            ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF7C4DFF),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            if (_isGeneratingAll) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF7C4DFF),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      onPressed: null,
+                      icon: const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                      label: Text(
+                        _cooldownSec > 0
+                            ? '⏳ Cooldown နားနေသည် (${_cooldownSec}s)...'
+                            : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                    ),
+                    onPressed: () => setState(() => _stopRequested = true),
+                    child: const Text('⏹️ ရပ်'),
+                  ),
+                ],
               ),
-              onPressed: _isGeneratingAll ? null : _startVideoAutoRecap,
-              icon: const Icon(Icons.auto_awesome),
-              label: Text(
-                _isGeneratingAll ? 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...' : '⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+            ] else if (hasUnfinishedParts) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orangeAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () => _startOrResumeAutoRecap(freshStart: false),
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('▶️ ရပ်ထားတဲ့အပိုင်းကနေ ဆက်ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
               ),
-            ),
+            ] else ...[
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF7C4DFF),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () => _startOrResumeAutoRecap(freshStart: true),
+                icon: const Icon(Icons.auto_awesome),
+                label: const Text('⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
 
             if (_parts.isNotEmpty) ...[
               const SizedBox(height: 14),
@@ -804,7 +907,7 @@ class _LongFormPageState extends State<LongFormPage> {
                                 else if (item.status == 'generating')
                                   const Text('👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...', style: TextStyle(fontSize: 11, color: Colors.amberAccent))
                                 else if (item.status == 'error')
-                                  const Text('❌ မအောင်မြင်ပါ (Retry ပြန်နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
+                                  const Text('❌ မအောင်မြင်ပါ (Retry သို့မဟုတ် ဆက်ထုတ်မယ် နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
                                 else if (item.outputPath != null)
                                   const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
                                 else
@@ -823,7 +926,7 @@ class _LongFormPageState extends State<LongFormPage> {
                           if (item.status == 'error')
                             ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
-                              onPressed: () => _retryPart(i),
+                              onPressed: _isGeneratingAll ? null : () => _retryPart(i),
                               icon: const Icon(Icons.refresh, size: 16),
                               label: const Text('Retry', style: TextStyle(fontSize: 12)),
                             )
