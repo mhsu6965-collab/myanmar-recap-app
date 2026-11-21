@@ -132,24 +132,111 @@ $myanmarTxtScript
               ],
               'generationConfig': {'temperature': 0.2},
             }),
-          );
+// ၂။ မြန်မာ .txt Script ကို ၈ မိနစ်စာ အပိုင်းလိုက်ခွဲပြီး Gemini (3.8 / 3.5) ဖြင့် တစ်ပိုင်းချင်း အချိန်တွဲမည်
+  Future<String> alignScriptWithGemini({
+    required String groqTimestamps,
+    required String myanmarTxtScript,
+    required List<String> geminiKeys,
+    Function(String)? onLog,
+  }) async {
+    // မြန်မာ Script ကို ၈ မိနစ်စာ (~5000 chars) စီ အရင်ခွဲမည် (နောက်ဆုံးအပိုင်း မပြည့်လည်း ကျန်သလောက် ယူမည်)
+    final paragraphs = myanmarTxtScript
+        .split(RegExp(r'\r?\n'))
+        .where((l) => l.trim().isNotEmpty)
+        .toList();
 
-          if (res.statusCode == 200) {
-            final json = jsonDecode(res.body);
-            final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
-            if (out != null && out.isNotEmpty) {
-              onLog?.call('✅ $model ဖြင့် Script နှင့် အချိန်တွဲပြီးပါပြီ။');
-              return out;
+    final List<String> scriptChunks = [];
+    final buf = StringBuffer();
+    for (final p in paragraphs) {
+      if (buf.length + p.length > 5000 && buf.isNotEmpty) {
+        scriptChunks.add(buf.toString().trim());
+        buf.clear();
+      }
+      buf.writeln(p.trim());
+    }
+    if (buf.isNotEmpty) {
+      scriptChunks.add(buf.toString().trim());
+    }
+
+    onLog?.call('Script ကို စုစုပေါင်း ${scriptChunks.length} ပိုင်းခွဲပြီး တစ်ပိုင်းချင်း အချိန်တွဲပါမည်...');
+
+    final models = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+    final allAligned = StringBuffer();
+
+    for (int c = 0; c < scriptChunks.length; c++) {
+      final chunkText = scriptChunks[c];
+      final prompt = '''
+You are a professional movie recap editor.
+Below is the full timestamped transcript of a video in [start-end] format (in seconds), followed by PART ${c + 1} of ${scriptChunks.length} of the user's Myanmar recap script.
+Match EVERY line of this Myanmar script part to its accurate [start-end] time range from the video transcript in chronological order.
+
+STRICT RULES:
+1. Output ONLY lines in this exact format: [start-end] Myanmar text
+2. Example: [12.5-35.0] မင်းသားက မြို့ထဲကို ရောက်လာပြီး...
+3. Do NOT change, shorten, or omit the user's Myanmar text.
+4. No explanations, no markdown, no extra headers.
+
+=== VIDEO TRANSCRIPT ===
+$groqTimestamps
+
+=== MYANMAR SCRIPT (PART ${c + 1}/${scriptChunks.length}) ===
+$chunkText
+''';
+
+      String? chunkResult;
+      String? lastError;
+
+      for (final model in models) {
+        if (chunkResult != null) break;
+        for (int i = 0; i < geminiKeys.length; i++) {
+          final key = geminiKeys[i];
+          onLog?.call('အပိုင်း (${c + 1}/${scriptChunks.length}) → $model | Key (${i + 1}/${geminiKeys.length})...');
+          try {
+            final uri = Uri.parse(
+              'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
+            );
+            final res = await http
+                .post(
+                  uri,
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode({
+                    'contents': [
+                      {
+                        'parts': [
+                          {'text': prompt}
+                        ]
+                      }
+                    ],
+                    'generationConfig': {'temperature': 0.2},
+                  }),
+                )
+                .timeout(const Duration(seconds: 60));
+
+            if (res.statusCode == 200) {
+              final json = jsonDecode(res.body);
+              final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
+              if (out != null && out.isNotEmpty) {
+                chunkResult = out;
+                onLog?.call('✅ အပိုင်း (${c + 1}/${scriptChunks.length}) တွဲပြီးပါပြီ။');
+                break;
+              }
             }
+            lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
+            if (res.statusCode == 404) break;
+          } catch (e) {
+            lastError = e.toString();
+            onLog?.call('⚠️ $model နှေး/မရပါ ($e) → နောက်တစ်ခု ပြောင်းစမ်းနေသည်...');
           }
-          lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
-          if (res.statusCode == 404) break;
-        } catch (e) {
-          lastError = e.toString();
         }
       }
+
+      if (chunkResult == null) {
+        throw Exception('အပိုင်း ${c + 1} မအောင်မြင်ပါ: $lastError');
+      }
+      allAligned.writeln(chunkResult);
     }
-    throw Exception('Gemini 3.8 / 3.5 အားလုံး မအောင်မြင်ပါ: $lastError');
+
+    return allAligned.toString().trim();
   }
 
   // ၃။ [start-end] Script ကို Part 1, Part 2, Part 3... အပိုင်းခွဲပေးမည်
