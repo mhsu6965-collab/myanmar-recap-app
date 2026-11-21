@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
 import 'services/long_form_service.dart';
 import 'services/ffmpeg_service.dart';
 
@@ -39,13 +40,13 @@ class _LongFormPageState extends State<LongFormPage> {
   final _geminiCtrl = TextEditingController();
 
   String? _videoPath;
-  String? _videoPreviewImg;
+  VideoPlayerController? _videoController;
   double _videoAspect = 16 / 9;
 
   String? _txtPath;
   String? _bgmPath;
 
-  // Groq Cache (တစ်ခါဖတ်ပြီးရင် ပြန်ဖတ်စရာမလို)
+  // Groq Cache
   String? _cachedGroqTimestamps;
   String? _cachedVideoPath;
 
@@ -59,7 +60,7 @@ class _LongFormPageState extends State<LongFormPage> {
 
   bool _enableSubtitles = true;
   double _subY = 0.82;
-  final double _subScale = 1.0;
+  double _subScale = 1.0;
   final String _subColorAss = '&H00FFFFFF';
 
   bool _enableBlur = true;
@@ -86,6 +87,14 @@ class _LongFormPageState extends State<LongFormPage> {
   void initState() {
     super.initState();
     _loadSavedKeys();
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    _groqCtrl.dispose();
+    _geminiCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSavedKeys() async {
@@ -142,57 +151,60 @@ class _LongFormPageState extends State<LongFormPage> {
   Future<void> _pickVideo() async {
     setState(() => _errorMsg = '');
     final file = await FilePicker.pickFile(type: FileType.video);
-  if (file != null && file.path != null) {
-    final path = file.path!;
+    if (file != null && file.path != null) {
+      final path = file.path!;
+      await _videoController?.dispose();
+      _videoController = null;
+
       setState(() {
         _videoPath = path;
-        _videoPreviewImg = null;
         if (_cachedVideoPath != path) {
           _cachedGroqTimestamps = null;
           _cachedVideoPath = null;
         }
       });
+
       try {
-        final info = await FfmpegService().getVideoInfo(path);
-        final w = (info['width'] as num).toDouble();
-        final h = (info['height'] as num).toDouble();
-        final previewPath = await FfmpegService().extractThumbnail(
-          videoPath: path,
-          atSeconds: 5.0,
-          enableMirror: false,
-        );
+        final ctrl = VideoPlayerController.file(File(path));
+        await ctrl.initialize();
+        ctrl.addListener(() {
+          if (mounted) setState(() {});
+        });
         if (mounted) {
           setState(() {
-            if (w > 0 && h > 0) _videoAspect = w / h;
-            _videoPreviewImg = previewPath;
+            _videoController = ctrl;
+            _videoAspect = ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (16 / 9);
           });
         }
-      } catch (_) {}
+      } catch (e) {
+        _addLog('⚠️ Preview ဖွင့်မရပါ: $e');
+      }
     }
   }
 
   Future<void> _pickTxt() async {
     final file = await FilePicker.pickFile(
-    type: FileType.custom,
-    allowedExtensions: ['txt'],
-  );
-  if (file != null && file.path != null) {
-    setState(() => _txtPath = file.path);
-  }
-  }
-    Future<void> _pickBgm() async {
-      final file = await FilePicker.pickFile(type: FileType.audio);
-  if (file != null && file.path != null) {
-    setState(() => _bgmPath = file.path);
-  }
+      type: FileType.custom,
+      allowedExtensions: ['txt'],
+    );
+    if (file != null && file.path != null) {
+      setState(() => _txtPath = file.path);
     }
-  // ၁။ Groq ဖတ်ပြီး Script ကို အပိုင်းခွဲကာ Part 1 မှစ၍ တစ်ပိုင်းချင်း Gemini တွဲမည်
+  }
+
+  Future<void> _pickBgm() async {
+    final file = await FilePicker.pickFile(type: FileType.audio);
+    if (file != null && file.path != null) {
+      setState(() => _bgmPath = file.path);
+    }
+  }
+
   Future<void> _prepareParts() async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
 
     if (_groqKey.isEmpty || geminiKeys.isEmpty) {
-      setState(() => _errorMsg = 'Groq Key နှင့် Gemini Key ကို Short Form Tab မှာ အရင်ထည့်ပြီး Save လုပ်ပါ');
+      setState(() => _errorMsg = 'အပေါ်က API Keys အကွက်မှာ Groq Key နှင့် Gemini Key ထည့်ပြီး Save နှိပ်ပါ');
       return;
     }
     if (_videoPath == null || _txtPath == null) {
@@ -223,7 +235,6 @@ class _LongFormPageState extends State<LongFormPage> {
       });
       _addLog('Script ကို စုစုပေါင်း ${rawChunks.length} ပိုင်း ခွဲပြီးပါပြီ။');
 
-      // Groq Timestamp (Cache ရှိပြီးသားဆိုရင် ပြန်မဖတ်တော့ဘူး)
       if (_cachedGroqTimestamps == null || _cachedVideoPath != _videoPath) {
         final ts = await svc.extractLongTimestamps(
           videoPath: _videoPath!,
@@ -236,7 +247,6 @@ class _LongFormPageState extends State<LongFormPage> {
         _addLog('⚡ သိမ်းထားပြီးသား Groq Timestamp ကို ပြန်သုံးပါမည်။');
       }
 
-      // တစ်ပိုင်းချင်း Gemini နဲ့ တွဲမယ် (Part 1 ပြီးတာနဲ့ တန်း Render နှိပ်လို့ရမယ်)
       for (int i = 0; i < _parts.length; i++) {
         await _alignSinglePart(i, geminiKeys);
       }
@@ -354,25 +364,36 @@ class _LongFormPageState extends State<LongFormPage> {
     }
   }
 
+  String _formatDur(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (d.inHours > 0) return '${d.inHours}:$m:$s';
+    return '$m:$s';
+  }
+
   Widget _buildInteractivePreview() {
-    if (_videoPreviewImg == null || !File(_videoPreviewImg!).existsSync()) {
+    final ctrl = _videoController;
+    if (ctrl == null || !ctrl.value.isInitialized) {
       return const SizedBox.shrink();
     }
 
+    final durMs = ctrl.value.duration.inMilliseconds.toDouble();
+    final posMs = ctrl.value.position.inMilliseconds.toDouble().clamp(0.0, durMs > 0 ? durMs : 1.0);
+
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 10),
         const Text(
-          '🎯 Blur Box နှင့် မြန်မာစာတန်းနေရာကို လက်နဲ့ဆွဲချိန်ပါ',
-          style: TextStyle(fontSize: 12, color: Colors.amberAccent),
+          '🎯 Blur ကို အလယ်ကဆွဲရွှေ့ / ညာအောက်ထောင့်က ဆွဲချဲ့ပါ • စာတန်းကို အပေါ်/အောက် ဆွဲပါ',
+          style: TextStyle(fontSize: 11, color: Colors.amberAccent),
         ),
         const SizedBox(height: 6),
         Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 240),
+            constraints: const BoxConstraints(maxHeight: 420),
             child: AspectRatio(
-              aspectRatio: _videoAspect.clamp(0.5, 2.2),
+              aspectRatio: _videoAspect.clamp(0.45, 2.2),
               child: LayoutBuilder(
                 builder: (context, constraints) {
                   final boxW = constraints.maxWidth;
@@ -385,10 +406,7 @@ class _LongFormPageState extends State<LongFormPage> {
                           child: Transform(
                             alignment: Alignment.center,
                             transform: Matrix4.identity()..scale(_enableMirror ? -1.0 : 1.0, 1.0),
-                            child: Image.file(
-                              File(_videoPreviewImg!),
-                              fit: BoxFit.cover,
-                            ),
+                            child: VideoPlayer(ctrl),
                           ),
                         ),
                         if (_enableBlur)
@@ -397,32 +415,59 @@ class _LongFormPageState extends State<LongFormPage> {
                             top: _blurBox.y * boxH,
                             width: _blurBox.w * boxW,
                             height: _blurBox.h * boxH,
-                            child: GestureDetector(
-                              onPanUpdate: (details) {
-                                setState(() {
-                                  _blurBox.x = (_blurBox.x + details.delta.dx / boxW).clamp(0.0, 1.0 - _blurBox.w);
-                                  _blurBox.y = (_blurBox.y + details.delta.dy / boxH).clamp(0.0, 1.0 - _blurBox.h);
-                                });
-                              },
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: Colors.blueAccent.withOpacity(0.35),
-                                  border: Border.all(color: Colors.lightBlueAccent, width: 2),
-                                  borderRadius: BorderRadius.circular(6),
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: GestureDetector(
+                                    onPanUpdate: (details) {
+                                      setState(() {
+                                        _blurBox.x = (_blurBox.x + details.delta.dx / boxW).clamp(0.0, 1.0 - _blurBox.w);
+                                        _blurBox.y = (_blurBox.y + details.delta.dy / boxH).clamp(0.0, 1.0 - _blurBox.h);
+                                      });
+                                    },
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.blueAccent.withOpacity(0.35),
+                                        border: Border.all(color: Colors.lightBlueAccent, width: 2),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: const Text(
+                                        'Blur နေရာ',
+                                        style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                                alignment: Alignment.center,
-                                child: const Text(
-                                  'Blur နေရာ (ဆွဲရွှေ့ပါ)',
-                                  style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.bold),
+                                Positioned(
+                                  right: 0,
+                                  bottom: 0,
+                                  child: GestureDetector(
+                                    onPanUpdate: (details) {
+                                      setState(() {
+                                        _blurBox.w = (_blurBox.w + details.delta.dx / boxW).clamp(0.10, 1.0 - _blurBox.x);
+                                        _blurBox.h = (_blurBox.h + details.delta.dy / boxH).clamp(0.06, 1.0 - _blurBox.y);
+                                      });
+                                    },
+                                    child: Container(
+                                      width: 24,
+                                      height: 24,
+                                      decoration: const BoxDecoration(
+                                        color: Colors.lightBlueAccent,
+                                        borderRadius: BorderRadius.only(topLeft: Radius.circular(6)),
+                                      ),
+                                      child: const Icon(Icons.open_in_full, size: 14, color: Colors.black),
+                                    ),
+                                  ),
                                 ),
-                              ),
+                              ],
                             ),
                           ),
                         if (_enableSubtitles)
                           Positioned(
                             left: 8,
                             right: 8,
-                            top: (_subY * boxH - 16).clamp(0.0, boxH - 32),
+                            top: (_subY * boxH - 18).clamp(0.0, boxH - 36),
                             child: GestureDetector(
                               onVerticalDragUpdate: (details) {
                                 setState(() {
@@ -436,10 +481,14 @@ class _LongFormPageState extends State<LongFormPage> {
                                   borderRadius: BorderRadius.circular(6),
                                   border: Border.all(color: Colors.amberAccent, width: 1.2),
                                 ),
-                                child: const Text(
-                                  'မြန်မာစာတန်းထိုးနေရာ (အပေါ်/အောက် ဆွဲပါ)',
+                                child: Text(
+                                  'မြန်မာစာတန်းထိုးနေရာ',
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.bold),
+                                  style: TextStyle(
+                                    fontSize: (13 * _subScale).clamp(9.0, 26.0),
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
                             ),
@@ -452,25 +501,49 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
           ),
         ),
-        if (_enableBlur) ...[
-          const SizedBox(height: 6),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            IconButton(
+              icon: Icon(
+                ctrl.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                color: Colors.lightBlueAccent,
+                size: 32,
+              ),
+              onPressed: () {
+                setState(() {
+                  ctrl.value.isPlaying ? ctrl.pause() : ctrl.play();
+                });
+              },
+            ),
+            Text(_formatDur(ctrl.value.position), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+            Expanded(
+              child: Slider(
+                value: posMs,
+                min: 0.0,
+                max: durMs > 0 ? durMs : 1.0,
+                onChanged: (v) => ctrl.seekTo(Duration(milliseconds: v.round())),
+              ),
+            ),
+            Text(_formatDur(ctrl.value.duration), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          ],
+        ),
+        if (_enableSubtitles)
           Row(
             children: [
-              const Text('Blur အမြင့်:', style: TextStyle(fontSize: 11, color: Colors.white70)),
+              const Text('စာတန်းအရွယ်:', style: TextStyle(fontSize: 11, color: Colors.white70)),
               Expanded(
                 child: Slider(
-                  value: _blurBox.h,
-                  min: 0.06,
-                  max: 0.35,
-                  onChanged: (v) => setState(() {
-                    _blurBox.h = v;
-                    if (_blurBox.y + _blurBox.h > 1.0) _blurBox.y = 1.0 - _blurBox.h;
-                  }),
+                  value: _subScale,
+                  min: 0.6,
+                  max: 1.8,
+                  divisions: 12,
+                  onChanged: (v) => setState(() => _subScale = v),
                 ),
               ),
+              Text('${(_subScale * 100).round()}%', style: const TextStyle(fontSize: 11, color: Colors.amberAccent)),
             ],
           ),
-        ],
       ],
     );
   }
@@ -551,6 +624,8 @@ class _LongFormPageState extends State<LongFormPage> {
                 ),
               ],
             ),
+
+            _buildCard(
               title: '၁။ ဗီဒီယို နှင့် မြန်မာ Script (.txt) ရွေးပါ',
               icon: Icons.video_library_rounded,
               children: [
