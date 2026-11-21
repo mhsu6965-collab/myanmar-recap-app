@@ -47,6 +47,7 @@ class _LongFormPageState extends State<LongFormPage> {
   double _videoTotalSec = 0.0;
 
   String? _bgmPath;
+  String? _mergedOutputPath;
 
   // Settings
   int _minutesPerPart = 3;
@@ -150,6 +151,7 @@ class _LongFormPageState extends State<LongFormPage> {
       setState(() {
         _videoPath = path;
         _videoTotalSec = 0.0;
+        _mergedOutputPath = null;
         _parts.clear();
       });
 
@@ -179,7 +181,18 @@ class _LongFormPageState extends State<LongFormPage> {
     }
   }
 
-  // ၁။ ဗီဒီယိုကို ၃ မိနစ်စီခွဲပြီး Gemini ကို တစ်ပိုင်းချင်း ကြည့်ခိုင်းကာ Script ထုတ်မည်
+  void _watchRenderedVideo(String path, String title) {
+    if (!File(path).existsSync()) {
+      setState(() => _errorMsg = 'ဗီဒီယိုဖိုင် မတွေ့ပါ');
+      return;
+    }
+    _videoController?.pause();
+    showDialog(
+      context: context,
+      builder: (_) => _RenderedVideoDialog(videoPath: path, title: title),
+    );
+  }
+
   Future<void> _startVideoAutoRecap() async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
@@ -196,6 +209,7 @@ class _LongFormPageState extends State<LongFormPage> {
     setState(() {
       _isGeneratingAll = true;
       _errorMsg = '';
+      _mergedOutputPath = null;
       _logs.clear();
       _parts.clear();
     });
@@ -346,7 +360,10 @@ class _LongFormPageState extends State<LongFormPage> {
     });
 
     try {
-      await LongFormService().mergeAllParts(partPaths: paths, onLog: _addLog);
+      final merged = await LongFormService().mergeAllParts(partPaths: paths, onLog: _addLog);
+      if (mounted) {
+        setState(() => _mergedOutputPath = merged);
+      }
     } catch (e) {
       setState(() => _errorMsg = 'Merge Error: $e');
       _addLog('❌ Merge Error: $e');
@@ -752,7 +769,7 @@ class _LongFormPageState extends State<LongFormPage> {
             if (_parts.isNotEmpty) ...[
               const SizedBox(height: 14),
               _buildCard(
-                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပါ (${_parts.length} ပိုင်း)',
+                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပြီး ကြည့်ပါ (${_parts.length} ပိုင်း)',
                 icon: Icons.playlist_play_rounded,
                 children: [
                   ...List.generate(_parts.length, (i) {
@@ -791,10 +808,18 @@ class _LongFormPageState extends State<LongFormPage> {
                                 else if (item.outputPath != null)
                                   const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
                                 else
-                                  Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ခန်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                                  Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
                               ],
                             ),
                           ),
+                          if (item.outputPath != null) ...[
+                            IconButton(
+                              tooltip: 'ဗီဒီယိုကြည့်မယ်',
+                              icon: const Icon(Icons.play_circle_fill, color: Colors.amberAccent, size: 30),
+                              onPressed: () => _watchRenderedVideo(item.outputPath!, 'Part ${item.partNumber} Render Video'),
+                            ),
+                            const SizedBox(width: 2),
+                          ],
                           if (item.status == 'error')
                             ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
@@ -807,6 +832,7 @@ class _LongFormPageState extends State<LongFormPage> {
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: item.outputPath != null ? Colors.green : Colors.blueAccent,
                                 foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                               ),
                               onPressed: item.isRendering ? null : () => _renderSinglePart(i),
                               icon: item.isRendering
@@ -838,6 +864,19 @@ class _LongFormPageState extends State<LongFormPage> {
                       label: Text(_isMerging ? 'ပေါင်းနေပါသည်...' : '🎞️ ပြီးသမျှ $completedCount ပိုင်းလုံးကို ၁ ပုဒ်တည်း ပေါင်းမယ်'),
                     ),
                   ],
+                  if (_mergedOutputPath != null) ...[
+                    const SizedBox(height: 8),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amberAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onPressed: () => _watchRenderedVideo(_mergedOutputPath!, 'YouTube Long Recap (Merged)'),
+                      icon: const Icon(Icons.play_circle_filled),
+                      label: const Text('▶️ ပေါင်းပြီးသား ဗီဒီယိုကို အခုကြည့်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ],
                 ],
               ),
             ],
@@ -865,6 +904,120 @@ class _LongFormPageState extends State<LongFormPage> {
             if (_errorMsg.isNotEmpty) ...[
               const SizedBox(height: 10),
               Text('❌ $_errorMsg', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RenderedVideoDialog extends StatefulWidget {
+  final String videoPath;
+  final String title;
+
+  const _RenderedVideoDialog({required this.videoPath, required this.title});
+
+  @override
+  State<_RenderedVideoDialog> createState() => _RenderedVideoDialogState();
+}
+
+class _RenderedVideoDialogState extends State<_RenderedVideoDialog> {
+  late VideoPlayerController _ctrl;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = VideoPlayerController.file(File(widget.videoPath))
+      ..initialize().then((_) {
+        if (mounted) {
+          setState(() => _ready = true);
+          _ctrl.play();
+        }
+      });
+    _ctrl.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final durMs = _ctrl.value.duration.inMilliseconds.toDouble();
+    final posMs = _ctrl.value.position.inMilliseconds.toDouble().clamp(0.0, durMs > 0 ? durMs : 1.0);
+
+    return Dialog(
+      backgroundColor: const Color(0xFF141720),
+      insetPadding: const EdgeInsets.all(14),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (!_ready)
+              const Padding(
+                padding: EdgeInsets.all(40),
+                child: CircularProgressIndicator(),
+              )
+            else ...[
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 420),
+                child: AspectRatio(
+                  aspectRatio: _ctrl.value.aspectRatio > 0 ? _ctrl.value.aspectRatio : (16 / 9),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: VideoPlayer(_ctrl),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _ctrl.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                      color: Colors.amberAccent,
+                      size: 34,
+                    ),
+                    onPressed: () => setState(() => _ctrl.value.isPlaying ? _ctrl.pause() : _ctrl.play()),
+                  ),
+                  Text(_fmt(_ctrl.value.position), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                  Expanded(
+                    child: Slider(
+                      value: posMs,
+                      min: 0.0,
+                      max: durMs > 0 ? durMs : 1.0,
+                      onChanged: (v) => _ctrl.seekTo(Duration(milliseconds: v.round())),
+                    ),
+                  ),
+                  Text(_fmt(_ctrl.value.duration), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                ],
+              ),
             ],
           ],
         ),
