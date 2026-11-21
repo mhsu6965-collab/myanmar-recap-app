@@ -104,7 +104,7 @@ class LongFormService {
   }
 
   // ၃။ အပိုင်းတစ်ပိုင်းတည်းကို Gemini (3.8 / 3.5) ဖြင့် အချိန်တွဲပေးမည် (503 ဖြစ်ရင် ၅ စက္ကန့်စောင့်ပြီး Auto-Retry)
-  Future<List>> alignSingleChunkWithGemini({
+  Future<List> alignSingleChunkWithGemini({
     required String groqTimestamps,
     required String chunkText,
     required int partNumber,
