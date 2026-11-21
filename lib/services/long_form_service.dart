@@ -79,67 +79,13 @@ class LongFormService {
     return buffer.toString().trim();
   }
 
-  // ၂။ မြန်မာ .txt Script ကို Groq Timestamp နှင့် Gemini (3.8 / 3.5) သုံးပြီး [start-end] တွဲပေးမည်
+  // ၂။ မြန်မာ .txt Script ကို ၈ မိနစ်စာ အပိုင်းလိုက်ခွဲပြီး Gemini (3.8 / 3.5) ဖြင့် တစ်ပိုင်းချင်း အချိန်တွဲမည်
   Future<String> alignScriptWithGemini({
     required String groqTimestamps,
     required String myanmarTxtScript,
     required List<String> geminiKeys,
     Function(String)? onLog,
   }) async {
-    final prompt = '''
-You are a professional movie recap editor.
-Below is the timestamped transcript of a long video in [start-end] format (in seconds), followed by a user's Myanmar recap script.
-Match EVERY paragraph or sentence of the Myanmar recap script to the most accurate [start-end] time range from the video transcript in chronological order.
-
-STRICT RULES:
-1. Output ONLY lines in this exact format: [start-end] Myanmar text
-2. Example: [12.5-35.0] မင်းသားက မြို့ထဲကို ရောက်လာပြီး...
-3. Do NOT change, shorten, or omit the user's Myanmar text. Keep all of it.
-4. Ensure start < end and timestamps progress forward chronologically.
-5. No explanations, no markdown, no extra headers.
-
-=== VIDEO TRANSCRIPT ===
-$groqTimestamps
-
-=== USER MYANMAR SCRIPT ===
-$myanmarTxtScript
-''';
-
-    final models = [
-      'gemini-3.8-flash',
-      'gemini-3.5-flash',
-    ];
-
-    String? lastError;
-    for (final model in models) {
-      for (int i = 0; i < geminiKeys.length; i++) {
-        final key = geminiKeys[i];
-        onLog?.call('$model | Key (${i + 1}/${geminiKeys.length}) ဖြင့် စမ်းနေသည်...');
-        try {
-          final uri = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
-          );
-          final res = await http.post(
-            uri,
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'contents': [
-                {
-                  'parts': [
-                    {'text': prompt}
-                  ]
-                }
-              ],
-              'generationConfig': {'temperature': 0.2},
-            }),
-// ၂။ မြန်မာ .txt Script ကို ၈ မိနစ်စာ အပိုင်းလိုက်ခွဲပြီး Gemini (3.8 / 3.5) ဖြင့် တစ်ပိုင်းချင်း အချိန်တွဲမည်
-  Future<String> alignScriptWithGemini({
-    required String groqTimestamps,
-    required String myanmarTxtScript,
-    required List<String> geminiKeys,
-    Function(String)? onLog,
-  }) async {
-    // မြန်မာ Script ကို ၈ မိနစ်စာ (~5000 chars) စီ အရင်ခွဲမည် (နောက်ဆုံးအပိုင်း မပြည့်လည်း ကျန်သလောက် ယူမည်)
     final paragraphs = myanmarTxtScript
         .split(RegExp(r'\r?\n'))
         .where((l) => l.trim().isNotEmpty)
@@ -225,7 +171,7 @@ $chunkText
             if (res.statusCode == 404) break;
           } catch (e) {
             lastError = e.toString();
-            onLog?.call('⚠️ $model နှေး/မရပါ ($e) → နောက်တစ်ခု ပြောင်းစမ်းနေသည်...');
+            onLog?.call('⚠️ $model နှေး/မရပါ → နောက်တစ်ခု ပြောင်းစမ်းနေသည်...');
           }
         }
       }
@@ -360,7 +306,7 @@ $chunkText
     return assPath;
   }
 
-  // ၄။ Part တစ်ခုချင်းစီကို Speed (0.6x) + 6s Play / 3s Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
+  // ၄။ Part တစ်ခုချင်းစီကို Speed + Play / Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
