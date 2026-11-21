@@ -10,7 +10,7 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာကို 240p 1fps (<1MB) အသေးဖြတ်ပြီး Gemini ကို အသေးစိတ် Script ရေးခိုင်းမည်
+  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာကို 240p 0.5fps (Token တစ်ဝက်သက်သာ) ဖြတ်ပြီး Gemini ကို အသေးစိတ် Script ရေးခိုင်းမည်
   Future generateScriptForVideoPart({
     required String videoPath,
     required int partNumber,
@@ -18,15 +18,16 @@ class LongFormService {
     required double chunkStartSec,
     required double chunkDurSec,
     required String previousSummary,
+    String previousTailLines = '',
     required List<String> geminiKeys,
     Function(String)? onLog,
   }) async {
     final tempDir = Directory.systemTemp;
     final smallClipPath = '${tempDir.path}/gemini_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    onLog?.call('Part $partNumber/$totalParts: ဖိုင်အသေး (240p/1fps) ဖြတ်ထုတ်နေသည်...');
+    onLog?.call('Part $partNumber/$totalParts: ဖိုင်အသေး (240p/0.5fps) ဖြတ်ထုတ်နေသည်...');
     final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
-        '-vf "scale=-2:240,fps=1" -c:v libx264 -preset ultrafast -crf 34 '
+        '-vf "scale=-2:240,fps=0.5" -c:v libx264 -preset ultrafast -crf 35 '
         '-c:a aac -ar 16000 -ac 1 -b:a 16k -movflags +faststart "$smallClipPath"';
 
     final cutSession = await FFmpegKit.execute(cutCmd);
@@ -43,27 +44,36 @@ class LongFormService {
     final int targetMinLines = (chunkDurSec / 8).round().clamp(10, 45);
     final int targetMaxLines = (chunkDurSec / 5).round().clamp(15, 60);
 
-    final contextBlock = previousSummary.trim().isEmpty
-        ? 'This is PART 1 (the beginning of the movie). Introduce the characters and setting clearly.'
-        : 'PREVIOUS STORY SUMMARY (continue seamlessly, keep character names & plot consistent):\n$previousSummary';
+    final contextBuf = StringBuffer();
+    if (previousSummary.trim().isEmpty) {
+      contextBuf.writeln('This is PART 1 (the beginning of the movie). Introduce the characters and setting clearly.');
+    } else {
+      contextBuf.writeln('PREVIOUS STORY SUMMARY (keep character names & plot 100% consistent):');
+      contextBuf.writeln(previousSummary.trim());
+      if (previousTailLines.trim().isNotEmpty) {
+        contextBuf.writeln('\nLAST NARRATION LINES FROM PREVIOUS PART (continue smoothly right after this, do NOT repeat or re-introduce):');
+        contextBuf.writeln(previousTailLines.trim());
+      }
+    }
 
     final prompt = '''
 You are a professional Burmese movie recap narrator.
 Watch this entire video clip (PART $partNumber of $totalParts, exact duration: ${chunkDurSec.toStringAsFixed(0)} seconds) very carefully—every scene, action, expression, and dialogue.
 
-$contextBlock
+${contextBuf.toString()}
 
 STRICT REQUIREMENTS:
 1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far>
 2. Write VERY DETAILED, engaging Burmese movie recap narration that matches the FULL ${chunkDurSec.toStringAsFixed(0)} seconds duration.
-3. Produce around $targetMinLines to $targetMaxLines detailed lines (roughly 1 rich sentence every 5-8 seconds) so the Burmese voiceover lasts close to ${chunkDurSec.toStringAsFixed(0)} seconds. Do NOT summarize too briefly!
-4. Format EVERY narration line strictly as: [start-end] Burmese text
+3. Produce around $targetMinLines to $targetMaxLines detailed lines (roughly 1 rich sentence every 5-8 seconds).
+4. Each [start-end] timestamp MUST strictly match the exact visual scene being described in that sentence.
+5. Format EVERY narration line strictly as: [start-end] Burmese text
    (start and end in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
-5. Example:
+6. Example:
 SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
 [0.0-7.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း သတိကြီးကြီးနဲ့ ဝင်လာခဲ့ပါတယ်။
 [7.5-15.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်တာကြောင့်...
-6. No markdown, no bold text, no extra explanations.
+7. No markdown, no bold text, no extra explanations.
 ''';
 
     final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
@@ -116,10 +126,16 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
 
                   final segments = parseAlignedSegments(out, offsetSec: chunkStartSec);
                   if (segments.isNotEmpty) {
+                    final tailList = segments.length >= 2
+                        ? segments.sublist(segments.length - 2)
+                        : segments;
+                    final tailLines = tailList.map((e) => e['text'].toString()).join('\n');
+
                     onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ကြောင်း)။');
                     return {
                       'segments': segments,
                       'summary': newSummary,
+                      'tailLines': tailLines,
                     };
                   }
                 }
@@ -128,8 +144,8 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
               lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
               if (res.statusCode == 404) break;
               if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
-                onLog?.call('⏳ Limit/Server ကျပ်နေသည် (${res.statusCode}) → ၈ စက္ကန့်စောင့်နေသည်...');
-                await Future.delayed(const Duration(seconds: 8));
+                onLog?.call('⏳ Limit/Server ကျပ်နေသည် (${res.statusCode}) → ၁၂ စက္ကန့်စောင့်နေသည်...');
+                await Future.delayed(const Duration(seconds: 12));
                 continue;
               }
               break;
@@ -255,7 +271,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     return assPath;
   }
 
-  // ၂။ Part Render ထုတ်မည် (Gallery ထဲ ၁ ပုဒ်တည်းပဲ ရောက်အောင် tempDir ထဲ အရင်ထုတ်ပြီးမှ Gal.putVideo ခေါ်မည်)
+  // ၂။ Strict Scene-Locked Sync ဖြင့် Render ထုတ်မည် (အခန်းမကျော်ဘဲ အသံနဲ့ ကွက်တိကိုက်စေမည်)
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -320,12 +336,11 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     final presetFast = '-preset ultrafast -crf 25 -threads 2';
     int clipCounter = 0;
     bool zoomInToggle = true;
-    double playAcc = 0.0;
 
     for (int i = 0; i < syncSegments.length; i++) {
       final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
       final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
-      final double segVidDur = (vEnd - vStart) > 0.5 ? (vEnd - vStart) : 4.0;
+      final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 3.0;
       final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
 
       if (!enableCopyrightSafe) {
@@ -334,63 +349,56 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
         onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
         final cmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
             '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
-            '-an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
+            '-t ${segAudDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
         final s = await FFmpegKit.execute(cmd);
         if (!ReturnCode.isSuccess(await s.getReturnCode())) {
           throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
         }
         clipListBuf.writeln("file '$clipPath'");
       } else {
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Speed ${videoSpeed}x + 6s/3s Freeze]...');
-        double remaining = segAudDur;
-        double curSrcPos = vStart;
-        final double ptsMult = 1.0 / videoSpeed.clamp(0.4, 1.0);
+        // Strict Scene-Locked Sync: [vStart - vEnd] ဘောင်ထဲမှာပဲ 0.65x ပြပြီး၊ အသံပိုရှည်နေရင် အဲဒီအခန်းနောက်ဆုံးပုံမှာ Freeze+Zoom လုပ်မည်
+        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) Scene-Locked Sync...');
+        final double safeSpeed = videoSpeed.clamp(0.4, 1.0);
+        final double ptsMult = 1.0 / safeSpeed;
+        final double maxPlayDur = segVidDur * ptsMult;
 
-        while (remaining > 0.15) {
-          final double needPlay = (playSec - playAcc).clamp(0.2, playSec);
-          final double playDur = remaining < needPlay ? remaining : needPlay;
-          final double srcNeeded = playDur * videoSpeed;
+        final double playDur = segAudDur <= maxPlayDur ? segAudDur : maxPlayDur;
+        final double srcNeeded = (playDur * safeSpeed).clamp(0.1, segVidDur);
 
-          final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-          final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.25).toStringAsFixed(3)} -i "$videoPath" '
-              '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
-              '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
+        final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+        final playCmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${(srcNeeded + 0.15).toStringAsFixed(3)} -i "$videoPath" '
+            '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
+            '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
 
-          final sPlay = await FFmpegKit.execute(playCmd);
-          if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
-            throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
-          }
-          clipListBuf.writeln("file '$playPath'");
+        final sPlay = await FFmpegKit.execute(playCmd);
+        if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
+          throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
+        }
+        clipListBuf.writeln("file '$playPath'");
 
-          curSrcPos += srcNeeded;
-          remaining -= playDur;
-          playAcc += playDur;
+        final double remAud = segAudDur - playDur;
+        if (remAud > 0.15) {
+          final int totalFrames = (remAud * 30).round().clamp(10, 600);
+          final double freezeAt = (vStart + srcNeeded - 0.05).clamp(vStart, vEnd);
+          final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
+          final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
 
-          if (playAcc >= playSec - 0.05 && remaining > 0.35) {
-            final double fDur = remaining >= freezeSec ? freezeSec : remaining;
-            final int totalFrames = (fDur * 30).round().clamp(15, 300);
-            final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
-            final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+          await FFmpegKit.execute(
+            '-y -ss ${freezeAt.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
+          );
 
-            await FFmpegKit.execute(
-              '-y -ss ${curSrcPos.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
-            );
+          final zoomExpr = zoomInToggle
+              ? "min(zoom+0.0020,1.22)"
+              : "if(lte(on,1),1.22,max(1.0,zoom-0.0020))";
+          zoomInToggle = !zoomInToggle;
 
-            final zoomExpr = zoomInToggle
-                ? "min(zoom+0.0022,1.22)"
-                : "if(lte(on,1),1.22,max(1.0,zoom-0.0022))";
-            zoomInToggle = !zoomInToggle;
+          final freezeCmd = '-y -i "$frameImg" '
+              '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
+              '-t ${remAud.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
 
-            final freezeCmd = '-y -i "$frameImg" '
-                '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
-                '-t ${fDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
-
-            final sFreeze = await FFmpegKit.execute(freezeCmd);
-            if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
-              clipListBuf.writeln("file '$freezePath'");
-              remaining -= fDur;
-            }
-            playAcc = 0.0;
+          final sFreeze = await FFmpegKit.execute(freezeCmd);
+          if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
+            clipListBuf.writeln("file '$freezePath'");
           }
         }
       }
@@ -407,7 +415,6 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
       throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
     }
 
-    // tempDir ထဲ အရင်သိမ်းမည် (Gallery ထဲ ၂ ပုဒ်ထပ်မရောက်အောင်)
     final outputPath = '${tempDir.path}/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
     final filterBuf = StringBuffer();
