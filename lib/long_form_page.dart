@@ -17,6 +17,7 @@ class _LongFormPageState extends State<LongFormPage> {
   final _geminiKeysCtrl = TextEditingController();
 
   String? _videoPath;
+  String? _videoPreviewImg;
   String? _txtPath;
   String _txtContent = '';
   String? _bgmPath;
@@ -88,12 +89,21 @@ class _LongFormPageState extends State<LongFormPage> {
   }
 
   Future<void> _pickVideo() async {
+    setState(() => _errorMsg = '');
     final file = await FilePicker.pickFile(type: FileType.video);
     if (file != null && file.path != null) {
       setState(() {
         _videoPath = file.path;
-        _errorMsg = '';
+        _videoPreviewImg = null;
       });
+      try {
+        final previewPath = await FfmpegService().extractThumbnail(
+          videoPath: file.path!,
+          atSeconds: 5.0,
+          enableMirror: false,
+        );
+        if (mounted) setState(() => _videoPreviewImg = previewPath);
+      } catch (_) {}
     }
   }
 
@@ -297,6 +307,42 @@ class _LongFormPageState extends State<LongFormPage> {
                     icon: const Icon(Icons.video_library, color: Color(0xFF00E5FF)),
                     label: Text(_videoPath == null ? '၁ နာရီစာ ဗီဒီယိုရွေးပါ' : 'ဗီဒီယို: ${_videoPath!.split('/').last}'),
                   ),
+                  if (_videoPath != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF11131A),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.greenAccent.withOpacity(0.5)),
+                      ),
+                      child: Row(
+                        children: [
+                          if (_videoPreviewImg != null && File(_videoPreviewImg!).existsSync())
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: Image.file(
+                                File(_videoPreviewImg!),
+                                width: 64,
+                                height: 42,
+                                fit: BoxFit.cover,
+                              ),
+                            )
+                          else
+                            const Icon(Icons.video_file, color: Colors.greenAccent, size: 36),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              '✅ ရွေးပြီး: ${_videoPath!.split('/').last}',
+                              style: const TextStyle(fontSize: 12, color: Colors.greenAccent),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   OutlinedButton.icon(
                     onPressed: _isBusy ? null : _pickTxt,
@@ -316,6 +362,7 @@ class _LongFormPageState extends State<LongFormPage> {
                     items: const [
                       DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲထုတ်မယ် (ဖုန်းအပေါ့ဆုံး)')),
                       DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲထုတ်မယ်')),
+                      DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲထုတ်မယ်')),
                       DropdownMenuItem(value: 10, child: Text('၁၀ မိနစ်စီ ခွဲထုတ်မယ်')),
                     ],
                     onChanged: (v) => setState(() => _minutesPerPart = v!),
