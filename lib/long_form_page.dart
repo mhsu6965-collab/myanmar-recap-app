@@ -1,562 +1,1130 @@
-import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart';
-import 'package:ffmpeg_kit_flutter_new/return_code.dart';
-import 'package:gal/gal.dart';
-import 'edge_tts_service.dart';
-import 'ffmpeg_service.dart';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
+import 'services/long_form_service.dart';
+import 'services/ffmpeg_service.dart';
 
-class LongFormService {
-  // ၁။ 240p 1fps ဖြတ်ထုတ်ပြီး Gemini ကို Scene အတိအကျနဲ့ Script ရေးခိုင်းမည်
-  Future generateScriptForVideoPart({
-    required String videoPath,
-    required int partNumber,
-    required int totalParts,
-    required double chunkStartSec,
-    required double chunkDurSec,
-    required String previousSummary,
-    String previousTailLines = '',
-    required List<String> geminiKeys,
-    Function(String)? onLog,
-  }) async {
-    final tempDir = Directory.systemTemp;
-    final smallClipPath = '${tempDir.path}/gemini_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+class _PartItem {
+  final int partNumber;
+  final double startSec;
+  final double durSec;
+  List? alignedSegments;
+  String summary;
+  String tailLines;
+  String status; // pending, generating, ready, error
+  String? errorText;
+  bool isRendering;
+  String? outputPath;
 
-    onLog?.call('Part $partNumber/$totalParts: ဖိုင်အသေး (240p/1fps) ဖြတ်ထုတ်နေသည်...');
-    final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
-        '-vf "scale=-2:240,fps=1" -c:v libx264 -preset ultrafast -crf 35 '
-        '-c:a aac -ar 16000 -ac 1 -b:a 16k -movflags +faststart "$smallClipPath"';
+  _PartItem({
+    required this.partNumber,
+    required this.startSec,
+    required this.durSec,
+    this.alignedSegments,
+    this.summary = '',
+    this.tailLines = '',
+    this.status = 'pending',
+    this.errorText,
+    this.isRendering = false,
+    this.outputPath,
+  });
+}
 
-    final cutSession = await FFmpegKit.execute(cutCmd);
-    if (!ReturnCode.isSuccess(await cutSession.getReturnCode())) {
-      throw Exception('Part $partNumber ဗီဒီယိုဖြတ်ထုတ်မရပါ');
-    }
+class LongFormPage extends StatefulWidget {
+  const LongFormPage({super.key});
 
-    final clipFile = File(smallClipPath);
-    final sizeMb = (await clipFile.length()) / (1024 * 1024);
-    onLog?.call('Part $partNumber: ဖိုင်ဆိုဒ် ${sizeMb.toStringAsFixed(2)} MB → Gemini ဆီ ပို့နေသည်...');
+  @override
+  State<LongFormPage> createState() => _LongFormPageState();
+}
 
-    final base64Video = base64Encode(await clipFile.readAsBytes());
+class _LongFormPageState extends State<LongFormPage> {
+  String _geminiKeysRaw = '';
+  final _geminiCtrl = TextEditingController();
 
-    final int targetMinLines = (chunkDurSec / 8).round().clamp(10, 45);
-    final int targetMaxLines = (chunkDurSec / 5).round().clamp(15, 60);
+  String? _videoPath;
+  VideoPlayerController? _videoController;
+  double _videoAspect = 16 / 9;
+  double _videoTotalSec = 0.0;
 
-    final contextBuf = StringBuffer();
-    if (previousSummary.trim().isEmpty) {
-      contextBuf.writeln('This is PART 1 (the beginning of the movie). Introduce the characters and setting clearly.');
-    } else {
-      contextBuf.writeln('PREVIOUS STORY SUMMARY (keep character names & plot 100% consistent):');
-      contextBuf.writeln(previousSummary.trim());
-      if (previousTailLines.trim().isNotEmpty) {
-        contextBuf.writeln('\nLAST NARRATION LINES FROM PREVIOUS PART (continue smoothly right after this, do NOT repeat):');
-        contextBuf.writeln(previousTailLines.trim());
-      }
-    }
+  String? _bgmPath;
+  String? _mergedOutputPath;
 
-    final prompt = '''
-You are a professional Burmese movie recap narrator.
-Watch this entire video clip (PART $partNumber of $totalParts, exact duration: ${chunkDurSec.toStringAsFixed(0)} seconds) very carefully.
+  // Settings
+  int _minutesPerPart = 3;
+  bool _enableCopyrightSafe = true;
+  double _videoSpeed = 0.65;
+  final double _playSec = 6.0;
+  final double _freezeSec = 3.0;
+  bool _enableMirror = false;
 
-${contextBuf.toString()}
+  bool _enableSubtitles = true;
+  double _subY = 0.82;
+  double _subScale = 1.0;
+  final String _subColorAss = '&H00FFFFFF';
 
-STRICT REQUIREMENTS:
-1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far>
-2. Write detailed, natural Burmese movie recap narration covering the FULL ${chunkDurSec.toStringAsFixed(0)} seconds ($targetMinLines to $targetMaxLines lines).
-3. CRITICAL SYNC RULE: Every [start-end] timestamp MUST match the EXACT second when that visual action/scene happens on screen. Do NOT use evenly spaced dummy timestamps.
-4. Format EVERY narration line strictly as: [start-end] Burmese text
-   (start and end in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
-5. Example:
-SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
-[0.0-6.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း ဝင်လာခဲ့ပါတယ်။
-[6.5-14.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်ပါတယ်။
-6. No markdown, no bold text, no extra explanations.
-''';
+  bool _enableBlur = true;
+  final BlurBox _blurBox = BlurBox(
+    enabled: true,
+    x: 0.05,
+    y: 0.78,
+    w: 0.90,
+    h: 0.14,
+  );
 
-    final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
-    final int startKeyIdx = (partNumber - 1) % geminiKeys.length;
-    String? lastError;
+  String _voice = 'my-MM-ThihaNeural';
+  double _ttsRate = 35.0;
+  final int _ttsPitch = 0;
+  String _resolution = '720p';
 
-    try {
-      for (final model in models) {
-        for (int k = 0; k < geminiKeys.length; k++) {
-          final keyIdx = (startKeyIdx + k) % geminiKeys.length;
-          final key = geminiKeys[keyIdx];
-          for (int attempt = 1; attempt <= 2; attempt++) {
-            onLog?.call('Part $partNumber/$totalParts → $model | Key ${keyIdx + 1}/${geminiKeys.length} (အကြိမ် $attempt)...');
-            try {
-              final uri = Uri.parse(
-                'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
-              );
-              final res = await http
-                  .post(
-                    uri,
-                    headers: {'Content-Type': 'application/json'},
-                    body: jsonEncode({
-                      'contents': [
-                        {
-                          'parts': [
-                            {
-                              'inline_data': {
-                                'mime_type': 'video/mp4',
-                                'data': base64Video,
-                              }
-                            },
-                            {'text': prompt}
-                          ]
-                        }
-                      ],
-                      'generationConfig': {'temperature': 0.3},
-                    }),
-                  )
-                  .timeout(const Duration(seconds: 120));
+  bool _isGeneratingAll = false;
+  bool _stopRequested = false;
+  int _cooldownSec = 0;
+  bool _isMerging = false;
+  String _errorMsg = '';
+  final List<String> _logs = [];
+  final List<_PartItem> _parts = [];
 
-              if (res.statusCode == 200) {
-                final json = jsonDecode(res.body);
-                final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
-                if (out != null && out.isNotEmpty) {
-                  String newSummary = previousSummary;
-                  final summaryMatch = RegExp(r'^SUMMARY:\s*(.+)$', multiLine: true).firstMatch(out);
-                  if (summaryMatch != null) {
-                    newSummary = summaryMatch.group(1)!.trim();
-                  }
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedKeys();
+  }
 
-                  final segments = parseAlignedSegments(out, offsetSec: chunkStartSec);
-                  if (segments.isNotEmpty) {
-                    final tailList = segments.length >= 2
-                        ? segments.sublist(segments.length - 2)
-                        : segments;
-                    final tailLines = tailList.map((e) => e['text'].toString()).join('\n');
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    _geminiCtrl.dispose();
+    super.dispose();
+  }
 
-                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ကြောင်း)။');
-                    return {
-                      'segments': segments,
-                      'summary': newSummary,
-                      'tailLines': tailLines,
-                    };
-                  }
-                }
-              }
+  Future<void> _loadSavedKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final gem = (prefs.getString('gemini_keys') ?? prefs.getString('gemini_api_keys') ?? '').trim();
+    setState(() {
+      _geminiKeysRaw = gem;
+      _geminiCtrl.text = gem;
+    });
+  }
 
-              lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
-              if (res.statusCode == 404) break;
-              if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
-                onLog?.call('⏳ Limit/Server ကျပ်နေသည် (${res.statusCode}) → ၁၂ စက္ကန့်စောင့်နေသည်...');
-                await Future.delayed(const Duration(seconds: 12));
-                continue;
-              }
-              break;
-            } catch (e) {
-              lastError = e.toString();
-              if (attempt == 1) {
-                onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
-                await Future.delayed(const Duration(seconds: 5));
-                continue;
-              }
-            }
-          }
-          if (lastError != null && lastError.contains('HTTP 404')) break;
-        }
-      }
-      throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
-    } finally {
-      try {
-        if (await clipFile.exists()) await clipFile.delete();
-      } catch (_) {}
+  Future<void> _saveKeys() async {
+    final prefs = await SharedPreferences.getInstance();
+    final gem = _geminiCtrl.text.trim();
+    await prefs.setString('gemini_keys', gem);
+    setState(() {
+      _geminiKeysRaw = gem;
+      _errorMsg = '';
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Gemini API Keys သိမ်းဆည်းပြီးပါပြီ!'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
-  List parseAlignedSegments(String alignedScript, {double offsetSec = 0.0}) {
-    final regex = RegExp(r'^\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*(.+)$');
-    final lines = alignedScript.split(RegExp(r'\r?\n'));
-    final List segments = [];
+  List<String> _parseGeminiKeys() {
+    return _geminiKeysRaw
+        .split(RegExp(r'[\n,]+'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
 
-    for (final line in lines) {
-      final m = regex.firstMatch(line.trim());
-      if (m != null) {
-        final s = double.parse(m.group(1)!) + offsetSec;
-        final e = double.parse(m.group(2)!) + offsetSec;
-        segments.add({
-          'vStart': s,
-          'vEnd': e > s ? e : s + 3.0,
-          'text': m.group(3)!.trim(),
+  void _addLog(String msg) {
+    final now = DateTime.now();
+    final t = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+    if (!mounted) return;
+    setState(() {
+      _logs.add('[$t] $msg');
+      if (_logs.length > 80) _logs.removeAt(0);
+    });
+  }
+
+  Future<void> _pickVideo() async {
+    setState(() => _errorMsg = '');
+    final file = await FilePicker.pickFile(type: FileType.video);
+    if (file != null && file.path != null) {
+      final path = file.path!;
+      await _videoController?.dispose();
+      _videoController = null;
+
+      setState(() {
+        _videoPath = path;
+        _videoTotalSec = 0.0;
+        _mergedOutputPath = null;
+        _parts.clear();
+      });
+
+      try {
+        final ctrl = VideoPlayerController.file(File(path));
+        await ctrl.initialize();
+        ctrl.addListener(() {
+          if (mounted) setState(() {});
+        });
+        if (mounted) {
+          setState(() {
+            _videoController = ctrl;
+            _videoAspect = ctrl.value.aspectRatio > 0 ? ctrl.value.aspectRatio : (16 / 9);
+            _videoTotalSec = ctrl.value.duration.inMilliseconds / 1000.0;
+          });
+        }
+      } catch (e) {
+        _addLog('⚠️ Preview ဖွင့်မရပါ: $e');
+      }
+    }
+  }
+
+  Future<void> _pickBgm() async {
+    final file = await FilePicker.pickFile(type: FileType.audio);
+    if (file != null && file.path != null) {
+      setState(() => _bgmPath = file.path);
+    }
+  }
+
+  void _watchRenderedVideo(String path, String title) {
+    if (!File(path).existsSync()) {
+      setState(() => _errorMsg = 'ဗီဒီယိုဖိုင် မတွေ့ပါ');
+      return;
+    }
+    _videoController?.pause();
+    showDialog(
+      context: context,
+      builder: (_) => _RenderedVideoDialog(videoPath: path, title: title),
+    );
+  }
+
+  // ၁။ ဗီဒီယိုခွဲပြီး (သို့) ရပ်ထားတဲ့အပိုင်းကနေ ပြန်ဆက်ပြီး 25s Cooldown ဖြင့် Script ထုတ်မည်
+  Future<void> _startOrResumeAutoRecap({bool freshStart = false}) async {
+    await _loadSavedKeys();
+    final geminiKeys = _parseGeminiKeys();
+
+    if (geminiKeys.isEmpty) {
+      setState(() => _errorMsg = 'အပေါ်က အကွက်မှာ Gemini API Key ထည့်ပြီး Save နှိပ်ပါ');
+      return;
+    }
+    if (_videoPath == null) {
+      setState(() => _errorMsg = 'ဗီဒီယိုဖိုင်ကို အရင်ရွေးပေးပါ');
+      return;
+    }
+
+    setState(() {
+      _isGeneratingAll = true;
+      _stopRequested = false;
+      _cooldownSec = 0;
+      _errorMsg = '';
+      if (freshStart) {
+        _mergedOutputPath = null;
+        _logs.clear();
+        _parts.clear();
+      }
+    });
+
+    try {
+      if (_parts.isEmpty) {
+        double totalSec = _videoTotalSec;
+        if (totalSec <= 0) {
+          totalSec = await FfmpegService().getDuration(_videoPath!);
+        }
+        if (totalSec <= 1.0) {
+          throw Exception('ဗီဒီယိုအရှည် ဖတ်၍မရပါ');
+        }
+
+        final double chunkLen = _minutesPerPart * 60.0;
+        final List<_PartItem> newParts = [];
+        double cursor = 0.0;
+        int pNum = 1;
+
+        while (cursor < totalSec - 1.0) {
+          final double remaining = totalSec - cursor;
+          final double dur = remaining >= chunkLen ? chunkLen : remaining;
+          newParts.add(_PartItem(partNumber: pNum++, startSec: cursor, durSec: dur));
+          cursor += dur;
+        }
+
+        setState(() => _parts.addAll(newParts));
+        _addLog('ဗီဒီယို (${(totalSec / 60).toStringAsFixed(1)} မိနစ်) ကို စုစုပေါင်း ${_parts.length} ပိုင်း ခွဲပြီးပါပြီ။');
+      }
+
+      for (int i = 0; i < _parts.length; i++) {
+        if (_stopRequested) {
+          _addLog('⏹️ အသုံးပြုသူမှ ခဏရပ်လိုက်ပါသည်။');
+          break;
+        }
+        if (_parts[i].status == 'ready') continue;
+
+        final ok = await _generateSinglePart(i, geminiKeys);
+        if (!ok) {
+          // Error တက်ရင် နောက်အပိုင်းကျော်မသွားဘဲ ချက်ချင်းရပ်မည် (ဇာတ်လမ်းအဆက်အစပ် မပြတ်စေရန်)
+          _addLog('🛑 Part ${_parts[i].partNumber} မအောင်မြင်၍ ခဏရပ်ထားပါသည်။ ခဏစောင့်ပြီး "ဆက်ထုတ်မယ်" နှိပ်ပါ။');
+          break;
+        }
+
+        // နောက်အပိုင်းကျန်သေးရင် Limit မထိအောင် ၂၅ စက္ကန့် နားပေးမည်
+        final hasMore = _parts.sublist(i + 1).any((p) => p.status != 'ready');
+        if (hasMore && !_stopRequested) {
+          _addLog('⏳ Limit မထိအောင် ၂၅ စက္ကန့် နားနေပါသည်...');
+          for (int sec = 25; sec > 0; sec--) {
+            if (_stopRequested || !mounted) break;
+            setState(() => _cooldownSec = sec);
+            await Future.delayed(const Duration(seconds: 1));
+          }
+          if (mounted) setState(() => _cooldownSec = 0);
+        }
+      }
+    } catch (e) {
+      setState(() => _errorMsg = e.toString());
+      _addLog('❌ $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isGeneratingAll = false;
+          _cooldownSec = 0;
         });
       }
     }
-    return segments;
   }
 
-  Future<String> _prepareFontDir() async {
-    final fontDir = Directory('${Directory.systemTemp.path}/fonts');
-    if (!await fontDir.exists()) await fontDir.create(recursive: true);
-
-    final fontFile = File('${fontDir.path}/Pyidaungsu.ttf');
-    if (!await fontFile.exists()) {
-      final data = await rootBundle.load('assets/fonts/Pyidaungsu.ttf');
-      await fontFile.writeAsBytes(data.buffer.asUint8List());
-    }
-    await FFmpegKitConfig.setFontDirectoryList([fontDir.path, '/system/fonts']);
-    return fontDir.path;
-  }
-
-  int _parseSrtTimeMs(String t) {
-    final parts = t.trim().split(RegExp(r'[:,.]'));
-    if (parts.length < 4) return 0;
-    return int.parse(parts[0]) * 3600000 +
-        int.parse(parts[1]) * 60000 +
-        int.parse(parts[2]) * 1000 +
-        int.parse(parts[3]);
-  }
-
-  String _formatAssTime(int ms) {
-    final safeMs = ms < 0 ? 0 : ms;
-    final h = safeMs ~/ 3600000;
-    final m = ((safeMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
-    final s = ((safeMs % 60000) ~/ 1000).toString().padLeft(2, '0');
-    final cs = ((safeMs % 1000) ~/ 10).toString().padLeft(2, '0');
-    return '$h:$m:$s.$cs';
-  }
-
-  Future<String> _convertSrtToAss({
-    required String srtPath,
-    required int outW,
-    required int outH,
-    required double subY,
-    required double subScale,
-    required String subColorAss,
-  }) async {
-    final srtContent = await File(srtPath).readAsString(encoding: utf8);
-    final assPath = '${Directory.systemTemp.path}/long_subs.ass';
-
-    final baseFontSize = outH * 0.052;
-    final fontSize = (baseFontSize * subScale).round().clamp(20, 180);
-    final outline = (fontSize * 0.07).round().clamp(2, 8);
-    final marginLR = (outW * 0.05).round();
-    final posX = outW ~/ 2;
-    final posY = (subY.clamp(0.05, 0.95) * outH).round();
-
-    final ass = StringBuffer();
-    ass.writeln('[Script Info]');
-    ass.writeln('ScriptType: v4.00+');
-    ass.writeln('PlayResX: $outW');
-    ass.writeln('PlayResY: $outH');
-    ass.writeln('WrapStyle: 2');
-    ass.writeln('ScaledBorderAndShadow: yes');
-    ass.writeln();
-    ass.writeln('[V4+ Styles]');
-    ass.writeln('Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding');
-    ass.writeln('Style: Default,Pyidaungsu,$fontSize,$subColorAss,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,$outline,1,5,$marginLR,$marginLR,0,1');
-    ass.writeln();
-    ass.writeln('[Events]');
-    ass.writeln('Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text');
-
-    final blocks = srtContent.trim().split(RegExp(r'\r?\n\r?\n'));
-    for (final block in blocks) {
-      final lines = block.split(RegExp(r'\r?\n'));
-      if (lines.length < 3) continue;
-      final timeLine = lines[1];
-      if (!timeLine.contains('-->')) continue;
-      final times = timeLine.split('-->');
-      final startMs = _parseSrtTimeMs(times[0]);
-      final endMs = _parseSrtTimeMs(times[1]);
-      final text = lines.sublist(2).join(r'\N').trim();
-      if (text.isEmpty) continue;
-      ass.writeln('Dialogue: 0,${_formatAssTime(startMs)},${_formatAssTime(endMs)},Default,,0,0,0,,{\\an5\\pos($posX,$posY)}$text');
-    }
-
-    await File(assPath).writeAsString(ass.toString(), encoding: utf8);
-    return assPath;
-  }
-
-  // ၂။ Zero-Drift Scene Sync + Continuous 6s Play / 3s Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
-  Future<String> renderPart({
-    required int partNumber,
-    required List partSegments,
-    required String videoPath,
-    required String voice,
-    required int ratePercent,
-    required int pitchHz,
-    required String resolution,
-    required bool enableCopyrightSafe,
-    required double videoSpeed,
-    required double playSec,
-    required double freezeSec,
-    required bool enableSubtitles,
-    required double subY,
-    required double subScale,
-    required String subColorAss,
-    required bool enableBlur,
-    required BlurBox blurBox,
-    bool enableMirror = false,
-    String? bgmPath,
-    double bgmVolume = 0.15,
-    bool saveToGallery = true,
-    Function(String)? onLog,
-  }) async {
-    final tempDir = Directory.systemTemp;
-    final partScriptBuf = StringBuffer();
-    for (final seg in partSegments) {
-      partScriptBuf.writeln('[${seg['vStart']}-${seg['vEnd']}] ${seg['text']}');
-    }
-
-    final audioPath = '${tempDir.path}/part_${partNumber}_tts.mp3';
-    final srtPath = '${tempDir.path}/part_${partNumber}_subs.srt';
-
-    onLog?.call('Part $partNumber: Edge TTS အသံထုတ်နေသည်...');
-    final syncSegments = await EdgeTtsService().synthesizeAuto(
-      text: partScriptBuf.toString().trim(),
-      voice: voice,
-      ratePercent: ratePercent,
-      pitchHz: pitchHz,
-      audioOutPath: audioPath,
-      srtOutPath: srtPath,
-      onLog: onLog,
-    );
-
-    final vidInfo = await FfmpegService().getVideoInfo(videoPath);
-    final int srcW = vidInfo['width'] as int;
-    final int srcH = vidInfo['height'] as int;
-    final double audDur = await FfmpegService().getDuration(audioPath);
-
-    final int targetShort = resolution == '1080p' ? 1080 : 720;
-    int outW;
-    int outH;
-    if (srcH >= srcW) {
-      outW = targetShort;
-      outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
-    } else {
-      outH = targetShort;
-      outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
-    }
-
-    final clipListBuf = StringBuffer();
-    final presetFast = '-preset ultrafast -crf 25 -threads 2';
-    int clipCounter = 0;
-    bool zoomInToggle = true;
-
-    // Continuous 6s Play / 3s Freeze Timer + Zero-Drift Timeline Tracker
-    double playAcc = 0.0;
-    double freezeRem = 0.0;
-    double targetTotalVid = 0.0;
-    double actualTotalVid = 0.0;
-
-    for (int i = 0; i < syncSegments.length; i++) {
-      final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
-      final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
-      final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 3.0;
-      final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
-
-      targetTotalVid += segAudDur;
-      double remaining = (targetTotalVid - actualTotalVid).clamp(0.2, 60.0);
-
-      if (!enableCopyrightSafe) {
-        final double ratio = (remaining / segVidDur).clamp(0.25, 4.0);
-        final clipPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
-        final cmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
-            '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
-            '-t ${remaining.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
-        final s = await FFmpegKit.execute(cmd);
-        if (!ReturnCode.isSuccess(await s.getReturnCode())) {
-          throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
-        }
-        clipListBuf.writeln("file '$clipPath'");
-        actualTotalVid += remaining;
-      } else {
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Sync + 6s/3s Freeze]...');
-        final double safeSpeed = videoSpeed.clamp(0.4, 1.0);
-        final double ptsMult = 1.0 / safeSpeed;
-        double curSrcPos = vStart;
-
-        while (remaining > 0.08) {
-          // (က) Freeze လုပ်ရမယ့်အလှည့် (သို့) လက်ရှိအခန်း vEnd ကုန်သွားရင် Freeze + Zoom In/Out လုပ်မည်
-          if (freezeRem > 0.08 || curSrcPos >= vEnd - 0.1) {
-            final double fDur = (freezeRem > 0.08)
-                ? (remaining < freezeRem ? remaining : freezeRem)
-                : remaining;
-            final int totalFrames = (fDur * 30).round().clamp(5, 600);
-            final double freezeAt = curSrcPos.clamp(vStart, vEnd);
-            final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
-            final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-
-            await FFmpegKit.execute(
-              '-y -ss ${freezeAt.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
-            );
-
-            final zoomExpr = zoomInToggle
-                ? "min(zoom+0.0022,1.22)"
-                : "if(lte(on,1),1.22,max(1.0,zoom-0.0022))";
-            zoomInToggle = !zoomInToggle;
-
-            final freezeCmd = '-y -i "$frameImg" '
-                '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
-                '-t ${fDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
-
-            final sFreeze = await FFmpegKit.execute(freezeCmd);
-            if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
-              clipListBuf.writeln("file '$freezePath'");
-              actualTotalVid += fDur;
-            }
-            remaining -= fDur;
-            if (freezeRem > 0.08) {
-              freezeRem = (freezeRem - fDur).clamp(0.0, freezeSec);
-            }
-            if (freezeRem <= 0.08) {
-              playAcc = 0.0;
-            }
-          } else {
-            // (ခ) Play လုပ်မယ့်အလှည့် (0.65x Speed ဖြင့် 6s ပြည့်သည်အထိ သို့မဟုတ် vEnd အထိ ပြမည်)
-            final double needPlay = (playSec - playAcc).clamp(0.15, playSec);
-            final double maxSrcLeft = (vEnd - curSrcPos).clamp(0.05, 60.0);
-            final double maxPlayFromScene = maxSrcLeft * ptsMult;
-
-            double playDur = remaining < needPlay ? remaining : needPlay;
-            if (playDur > maxPlayFromScene) playDur = maxPlayFromScene;
-
-            final double srcNeeded = (playDur * safeSpeed).clamp(0.05, maxSrcLeft);
-            final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-            final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.15).toStringAsFixed(3)} -i "$videoPath" '
-                '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
-                '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
-
-            final sPlay = await FFmpegKit.execute(playCmd);
-            if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
-              throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
-            }
-            clipListBuf.writeln("file '$playPath'");
-            actualTotalVid += playDur;
-            curSrcPos += srcNeeded;
-            remaining -= playDur;
-            playAcc += playDur;
-
-            if (playAcc >= playSec - 0.05) {
-              freezeRem = freezeSec;
-              playAcc = 0.0;
-            }
-          }
-        }
+  String _getPreviousSummary(int index) {
+    for (int i = index - 1; i >= 0; i--) {
+      if (_parts[i].summary.trim().isNotEmpty) {
+        return _parts[i].summary.trim();
       }
     }
-
-    final listFile = File('${tempDir.path}/p${partNumber}_list.txt');
-    await listFile.writeAsString(clipListBuf.toString());
-
-    final rawConcatPath = '${tempDir.path}/p${partNumber}_raw.mp4';
-    final concatSession = await FFmpegKit.execute(
-      '-y -f concat -safe 0 -i "${listFile.path}" -c copy "$rawConcatPath"',
-    );
-    if (!ReturnCode.isSuccess(await concatSession.getReturnCode())) {
-      throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
-    }
-
-    final outputPath = '${tempDir.path}/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
-
-    final filterBuf = StringBuffer();
-    String currentV = '0:v';
-
-    if (enableBlur && blurBox.enabled) {
-      final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
-      final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
-      final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
-      final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
-      filterBuf.writeln(
-        '[$currentV]split[m1][b1];'
-        '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
-        '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
-      );
-      currentV = 'v_blur';
-    }
-
-    if (enableMirror) {
-      filterBuf.writeln('[$currentV]hflip[v_flip];');
-      currentV = 'v_flip';
-    }
-
-    if (enableSubtitles) {
-      final fontDir = await _prepareFontDir();
-      final assPath = await _convertSrtToAss(
-        srtPath: srtPath,
-        outW: outW,
-        outH: outH,
-        subY: subY,
-        subScale: subScale,
-        subColorAss: subColorAss,
-      );
-      filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
-      currentV = 'v_out';
-    } else if (currentV == '0:v') {
-      filterBuf.writeln('[0:v]null[v_out];');
-      currentV = 'v_out';
-    }
-
-    String audioInputArgs = '-i "$audioPath"';
-    if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
-      audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
-      filterBuf.write(
-        '[1:a]aresample=async=1:first_pts=0[tts_a];'
-        '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
-        '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
-      );
-    } else {
-      filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
-    }
-
-    final filterScriptPath = '${tempDir.path}/p${partNumber}_filter.txt';
-    await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
-
-    onLog?.call('Part $partNumber: အသံ၊ စာတန်း နှင့် BGM ပေါင်းထုတ်နေသည်...');
-    final finalCmd = '-y -i "$rawConcatPath" $audioInputArgs '
-        '-filter_complex_script "$filterScriptPath" '
-        '-map "[$currentV]" -map "[a_out]" '
-        '-c:v libx264 $presetFast -pix_fmt yuv420p '
-        '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
-
-    final finalSession = await FFmpegKit.execute(finalCmd);
-    if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
-      final logs = await finalSession.getAllLogsAsString();
-      throw Exception('Part $partNumber Render မအောင်မြင်ပါ:\n$logs');
-    }
-
-    if (saveToGallery) {
-      try {
-        await Gal.putVideo(outputPath, album: 'Myanmar Recap');
-        onLog?.call('✅ Part $partNumber ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
-      } catch (_) {}
-    }
-
-    return outputPath;
+    return '';
   }
 
-  // ၃။ Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
-  Future<String> mergeAllParts({
-    required List<String> partPaths,
-    Function(String)? onLog,
-  }) async {
-    final tempDir = Directory.systemTemp;
-    final listBuf = StringBuffer();
-    for (final p in partPaths) {
-      listBuf.writeln("file '$p'");
+  String _getPreviousTailLines(int index) {
+    for (int i = index - 1; i >= 0; i--) {
+      if (_parts[i].tailLines.trim().isNotEmpty) {
+        return _parts[i].tailLines.trim();
+      }
     }
-    final listFile = File('${tempDir.path}/merge_all_parts.txt');
-    await listFile.writeAsString(listBuf.toString());
+    return '';
+  }
 
-    final mergedPath = '${tempDir.path}/YouTube_LongRecap_${DateTime.now().millisecondsSinceEpoch}.mp4';
-
-    onLog?.call('Part ${partPaths.length} ခုလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းနေသည်...');
-    final session = await FFmpegKit.execute(
-      '-y -f concat -safe 0 -i "${listFile.path}" -c copy -movflags +faststart "$mergedPath"',
-    );
-    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('Part များ ပေါင်း၍မရပါ');
-    }
+  Future<bool> _generateSinglePart(int index, List<String> geminiKeys) async {
+    final item = _parts[index];
+    setState(() {
+      item.status = 'generating';
+      item.errorText = null;
+    });
 
     try {
-      await Gal.putVideo(mergedPath, album: 'Myanmar Recap');
-      onLog?.call('✅ YouTube Long Recap ကို Gallery ထဲ သိမ်းပြီးပါပြီ!');
-    } catch (_) {}
+      final prevSummary = _getPreviousSummary(index);
+      final prevTail = _getPreviousTailLines(index);
+      final result = await LongFormService().generateScriptForVideoPart(
+        videoPath: _videoPath!,
+        partNumber: item.partNumber,
+        totalParts: _parts.length,
+        chunkStartSec: item.startSec,
+        chunkDurSec: item.durSec,
+        previousSummary: prevSummary,
+        previousTailLines: prevTail,
+        geminiKeys: geminiKeys,
+        onLog: _addLog,
+      );
 
-    return mergedPath;
+      if (mounted) {
+        setState(() {
+          item.alignedSegments = result['segments'] as List;
+          item.summary = (result['summary'] ?? '').toString();
+          item.tailLines = (result['tailLines'] ?? '').toString();
+          item.status = 'ready';
+        });
+      }
+      return true;
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          item.status = 'error';
+          item.errorText = e.toString();
+        });
+      }
+      _addLog('❌ Part ${item.partNumber} မအောင်မြင်ပါ: $e');
+      return false;
+    }
+  }
+
+  Future<void> _retryPart(int index) async {
+    await _loadSavedKeys();
+    final geminiKeys = _parseGeminiKeys();
+    if (geminiKeys.isEmpty) {
+      setState(() => _errorMsg = 'Gemini API Key မရှိပါ');
+      return;
+    }
+    await _generateSinglePart(index, geminiKeys);
+  }
+
+  Future<void> _renderSinglePart(int index) async {
+    final item = _parts[index];
+    if (item.alignedSegments == null || item.isRendering) return;
+
+    setState(() {
+      item.isRendering = true;
+      _errorMsg = '';
+    });
+
+    try {
+      _blurBox.enabled = _enableBlur;
+      final outPath = await LongFormService().renderPart(
+        partNumber: item.partNumber,
+        partSegments: item.alignedSegments!,
+        videoPath: _videoPath!,
+        voice: _voice,
+        ratePercent: _ttsRate.round(),
+        pitchHz: _ttsPitch,
+        resolution: _resolution,
+        enableCopyrightSafe: _enableCopyrightSafe,
+        videoSpeed: _videoSpeed,
+        playSec: _playSec,
+        freezeSec: _freezeSec,
+        enableSubtitles: _enableSubtitles,
+        subY: _subY,
+        subScale: _subScale,
+        subColorAss: _subColorAss,
+        enableBlur: _enableBlur,
+        blurBox: _blurBox,
+        enableMirror: _enableMirror,
+        bgmPath: _bgmPath,
+        onLog: _addLog,
+      );
+      if (mounted) {
+        setState(() => item.outputPath = outPath);
+      }
+    } catch (e) {
+      if (mounted) setState(() => _errorMsg = 'Part ${item.partNumber} Render Error: $e');
+      _addLog('❌ Part ${item.partNumber} Render Error: $e');
+    } finally {
+      if (mounted) setState(() => item.isRendering = false);
+    }
+  }
+
+  Future<void> _mergeCompletedParts() async {
+    final paths = _parts.where((p) => p.outputPath != null).map((p) => p.outputPath!).toList();
+    if (paths.length < 2) return;
+
+    setState(() {
+      _isMerging = true;
+      _errorMsg = '';
+    });
+
+    try {
+      final merged = await LongFormService().mergeAllParts(partPaths: paths, onLog: _addLog);
+      if (mounted) {
+        setState(() => _mergedOutputPath = merged);
+      }
+    } catch (e) {
+      setState(() => _errorMsg = 'Merge Error: $e');
+      _addLog('❌ Merge Error: $e');
+    } finally {
+      if (mounted) setState(() => _isMerging = false);
+    }
+  }
+
+  String _formatDur(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (d.inHours > 0) return '${d.inHours}:$m:$s';
+    return '$m:$s';
+  }
+
+  String _formatSecRange(double start, double dur) {
+    return '${_formatDur(Duration(seconds: start.round()))} - ${_formatDur(Duration(seconds: (start + dur).round()))}';
+  }
+
+  Widget _buildInteractivePreview() {
+    final ctrl = _videoController;
+    if (ctrl == null || !ctrl.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+
+    final durMs = ctrl.value.duration.inMilliseconds.toDouble();
+    final posMs = ctrl.value.position.inMilliseconds.toDouble().clamp(0.0, durMs > 0 ? durMs : 1.0);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 10),
+        const Text(
+          '🎯 Blur ကို အလယ်ကဆွဲရွှေ့ / ညာအောက်ထောင့်က ဆွဲချဲ့ပါ • စာတန်းကို အပေါ်/အောက် ဆွဲပါ',
+          style: TextStyle(fontSize: 11, color: Colors.amberAccent),
+        ),
+        const SizedBox(height: 6),
+        Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 420),
+            child: AspectRatio(
+              aspectRatio: _videoAspect.clamp(0.45, 2.2),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final boxW = constraints.maxWidth;
+                  final boxH = constraints.maxHeight;
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Transform(
+                            alignment: Alignment.center,
+                            transform: Matrix4.identity()..scale(_enableMirror ? -1.0 : 1.0, 1.0),
+                            child: VideoPlayer(ctrl),
+                          ),
+                        ),
+                        if (_enableBlur)
+                          Positioned(
+                            left: _blurBox.x * boxW,
+                            top: _blurBox.y * boxH,
+                            width: _blurBox.w * boxW,
+                            height: _blurBox.h * boxH,
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: GestureDetector(
+                                    onPanUpdate: (details) {
+                                      setState(() {
+                                        _blurBox.x = (_blurBox.x + details.delta.dx / boxW).clamp(0.0, 1.0 - _blurBox.w);
+                                        _blurBox.y = (_blurBox.y + details.delta.dy / boxH).clamp(0.0, 1.0 - _blurBox.h);
+                                      });
+                                    },
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.blueAccent.withOpacity(0.35),
+                                        border: Border.all(color: Colors.lightBlueAccent, width: 2),
+                                        borderRadius: BorderRadius.circular(6),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: const Text(
+                                        'Blur နေရာ',
+                                        style: TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  bottom: 0,
+                                  child: GestureDetector(
+                                    onPanUpdate: (details) {
+                                      setState(() {
+                                        _blurBox.w = (_blurBox.w + details.delta.dx / boxW).clamp(0.10, 1.0 - _blurBox.x);
+                                        _blurBox.h = (_blurBox.h + details.delta.dy / boxH).clamp(0.06, 1.0 - _blurBox.y);
+                                      });
+                                    },
+                                    child: Container(
+                                      width: 24,
+                                      height: 24,
+                                      decoration: const BoxDecoration(
+                                        color: Colors.lightBlueAccent,
+                                        borderRadius: BorderRadius.only(topLeft: Radius.circular(6)),
+                                      ),
+                                      child: const Icon(Icons.open_in_full, size: 14, color: Colors.black),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (_enableSubtitles)
+                          Positioned(
+                            left: 8,
+                            right: 8,
+                            top: (_subY * boxH - 18).clamp(0.0, boxH - 36),
+                            child: GestureDetector(
+                              onVerticalDragUpdate: (details) {
+                                setState(() {
+                                  _subY = (_subY + details.delta.dy / boxH).clamp(0.08, 0.94);
+                                });
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.65),
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(color: Colors.amberAccent, width: 1.2),
+                                ),
+                                child: Text(
+                                  'မြန်မာစာတန်းထိုးနေရာ',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: (13 * _subScale).clamp(9.0, 26.0),
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            IconButton(
+              icon: Icon(
+                ctrl.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                color: Colors.lightBlueAccent,
+                size: 32,
+              ),
+              onPressed: () {
+                setState(() {
+                  ctrl.value.isPlaying ? ctrl.pause() : ctrl.play();
+                });
+              },
+            ),
+            Text(_formatDur(ctrl.value.position), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+            Expanded(
+              child: Slider(
+                value: posMs,
+                min: 0.0,
+                max: durMs > 0 ? durMs : 1.0,
+                onChanged: (v) => ctrl.seekTo(Duration(milliseconds: v.round())),
+              ),
+            ),
+            Text(_formatDur(ctrl.value.duration), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+          ],
+        ),
+        if (_enableSubtitles)
+          Row(
+            children: [
+              const Text('စာတန်းအရွယ်:', style: TextStyle(fontSize: 11, color: Colors.white70)),
+              Expanded(
+                child: Slider(
+                  value: _subScale,
+                  min: 0.6,
+                  max: 1.8,
+                  divisions: 12,
+                  onChanged: (v) => setState(() => _subScale = v),
+                ),
+              ),
+              Text('${(_subScale * 100).round()}%', style: const TextStyle(fontSize: 11, color: Colors.amberAccent)),
+            ],
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCard({required String title, required IconData icon, required List<Widget> children}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF181B24),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFF262A38)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 18, color: Colors.lightBlueAccent),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          ...children,
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final completedCount = _parts.where((p) => p.outputPath != null).length;
+    final hasUnfinishedParts = _parts.isNotEmpty && _parts.any((p) => p.status != 'ready');
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Long-Form AI Video Studio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        backgroundColor: const Color(0xFF12141C),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildCard(
+              title: '🔑 Gemini API Keys (25s Cooldown / Limit သက်သာ)',
+              icon: Icons.vpn_key_rounded,
+              children: [
+                TextField(
+                  controller: _geminiCtrl,
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: 'Gemini API Keys (တစ်ခုထက်ပိုရင် Enter ခေါက်ထည့်ပါ)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _saveKeys,
+                  icon: const Icon(Icons.save_rounded, size: 18),
+                  label: const Text('💾 API Keys သိမ်းမယ် (Save)'),
+                ),
+              ],
+            ),
+
+            _buildCard(
+              title: '၁။ ဗီဒီယို နှင့် BGM ရွေးပါ',
+              icon: Icons.video_library_rounded,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _isGeneratingAll ? null : _pickVideo,
+                  icon: const Icon(Icons.movie_creation_outlined, color: Colors.lightBlueAccent),
+                  label: Text(
+                    _videoPath == null ? 'ဗီဒီယိုဖိုင် ရွေးမယ် (1hr+ ရသည်)' : '✅ ${_videoPath!.split('/').last}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                _buildInteractivePreview(),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _isGeneratingAll ? null : _pickBgm,
+                  icon: const Icon(Icons.music_note, color: Colors.pinkAccent),
+                  label: Text(
+                    _bgmPath == null ? 'BGM သီချင်း (မထည့်လည်းရသည်)' : '🎵 ${_bgmPath!.split('/').last}',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<int>(
+                  value: _minutesPerPart,
+                  decoration: const InputDecoration(labelText: 'Gemini ဆီ ပို့မည့် အပိုင်းအရှည်', border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲပို့မယ် (အကောင်းဆုံး / Limit သက်သာ)')),
+                    DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲပို့မယ်')),
+                    DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲပို့မယ်')),
+                  ],
+                  onChanged: _isGeneratingAll ? null : (v) => setState(() => _minutesPerPart = v ?? 3),
+                ),
+              ],
+            ),
+
+            _buildCard(
+              title: '၂။ Copyright-Safe Edit (Scene-Locked Sync + Mirror)',
+              icon: Icons.shield_rounded,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('ဗီဒီယို ဘယ်/ညာ လှည့်မယ် (Mirror)', style: TextStyle(fontSize: 13)),
+                  value: _enableMirror,
+                  onChanged: (v) => setState(() => _enableMirror = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Scene-Locked Speed + Freeze/Zoom ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
+                  value: _enableCopyrightSafe,
+                  onChanged: (v) => setState(() => _enableCopyrightSafe = v),
+                ),
+                if (_enableCopyrightSafe) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('မူရင်းဗီဒီယို Speed', style: TextStyle(fontSize: 12)),
+                      Text('${_videoSpeed.toStringAsFixed(2)}x', style: const TextStyle(color: Colors.lightBlueAccent)),
+                    ],
+                  ),
+                  Slider(
+                    value: _videoSpeed,
+                    min: 0.50,
+                    max: 1.00,
+                    divisions: 10,
+                    onChanged: (v) => setState(() => _videoSpeed = v),
+                  ),
+                ],
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('မြန်မာစာတန်းထိုး ထည့်မယ်', style: TextStyle(fontSize: 13)),
+                  value: _enableSubtitles,
+                  onChanged: (v) => setState(() => _enableSubtitles = v),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Blur Box ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
+                  value: _enableBlur,
+                  onChanged: (v) => setState(() => _enableBlur = v),
+                ),
+              ],
+            ),
+
+            _buildCard(
+              title: '၃။ Edge TTS နှင့် Output Resolution',
+              icon: Icons.record_voice_over_rounded,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: _voice,
+                  decoration: const InputDecoration(labelText: 'အသံရွေးပါ', border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
+                    DropdownMenuItem(value: 'my-MM-NilarNeural', child: Text('Nilar (အမျိုးသမီး)')),
+                  ],
+                  onChanged: (v) => setState(() => _voice = v ?? 'my-MM-ThihaNeural'),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('TTS Speed', style: TextStyle(fontSize: 12)),
+                    Text('${_ttsRate.round()}%', style: const TextStyle(color: Colors.lightBlueAccent)),
+                  ],
+                ),
+                Slider(
+                  value: _ttsRate,
+                  min: -50,
+                  max: 100,
+                  divisions: 30,
+                  onChanged: (v) => setState(() => _ttsRate = v),
+                ),
+                DropdownButtonFormField<String>(
+                  value: _resolution,
+                  decoration: const InputDecoration(labelText: 'Render ထုတ်မည့် Resolution', border: OutlineInputBorder()),
+                  items: const [
+                    DropdownMenuItem(value: '720p', child: Text('720p HD (မြန် / CPU သက်သာ)')),
+                    DropdownMenuItem(value: '1080p', child: Text('1080p Full HD')),
+                  ],
+                  onChanged: (v) => setState(() => _resolution = v ?? '720p'),
+                ),
+              ],
+            ),
+
+            if (_isGeneratingAll) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF7C4DFF),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      onPressed: null,
+                      icon: const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                      label: Text(
+                        _cooldownSec > 0
+                            ? '⏳ Cooldown နားနေသည် (${_cooldownSec}s)...'
+                            : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                    ),
+                    onPressed: () => setState(() => _stopRequested = true),
+                    child: const Text('⏹️ ရပ်'),
+                  ),
+                ],
+              ),
+            ] else if (hasUnfinishedParts) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.orangeAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      onPressed: () => _startOrResumeAutoRecap(freshStart: false),
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('▶️ ရပ်ထားတဲ့အပိုင်းကနေ ဆက်ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ] else ...[
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF7C4DFF),
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () => _startOrResumeAutoRecap(freshStart: true),
+                icon: const Icon(Icons.auto_awesome),
+                label: const Text('⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+
+            if (_parts.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              _buildCard(
+                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပြီး ကြည့်ပါ (${_parts.length} ပိုင်း)',
+                icon: Icons.playlist_play_rounded,
+                children: [
+                  ...List.generate(_parts.length, (i) {
+                    final item = _parts[i];
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF11131A),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: item.outputPath != null
+                              ? Colors.greenAccent.withOpacity(0.5)
+                              : item.status == 'error'
+                                  ? Colors.redAccent.withOpacity(0.6)
+                                  : const Color(0xFF262A38),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Part ${item.partNumber} (${_formatSecRange(item.startSec, item.durSec)})',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                ),
+                                const SizedBox(height: 2),
+                                if (item.status == 'pending')
+                                  const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
+                                else if (item.status == 'generating')
+                                  const Text('👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...', style: TextStyle(fontSize: 11, color: Colors.amberAccent))
+                                else if (item.status == 'error')
+                                  const Text('❌ မအောင်မြင်ပါ (Retry သို့မဟုတ် ဆက်ထုတ်မယ် နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
+                                else if (item.outputPath != null)
+                                  const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
+                                else
+                                  Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                              ],
+                            ),
+                          ),
+                          if (item.outputPath != null) ...[
+                            IconButton(
+                              tooltip: 'ဗီဒီယိုကြည့်မယ်',
+                              icon: const Icon(Icons.play_circle_fill, color: Colors.amberAccent, size: 30),
+                              onPressed: () => _watchRenderedVideo(item.outputPath!, 'Part ${item.partNumber} Render Video'),
+                            ),
+                            const SizedBox(width: 2),
+                          ],
+                          if (item.status == 'error')
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
+                              onPressed: _isGeneratingAll ? null : () => _retryPart(i),
+                              icon: const Icon(Icons.refresh, size: 16),
+                              label: const Text('Retry', style: TextStyle(fontSize: 12)),
+                            )
+                          else if (item.status == 'ready')
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: item.outputPath != null ? Colors.green : Colors.blueAccent,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              ),
+                              onPressed: item.isRendering ? null : () => _renderSinglePart(i),
+                              icon: item.isRendering
+                                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                  : const Icon(Icons.movie_filter_rounded, size: 16),
+                              label: Text(
+                                item.isRendering
+                                    ? 'ထုတ်နေသည်'
+                                    : item.outputPath != null
+                                        ? 'ပြန်ထုတ်'
+                                        : '🎬 Render',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  }),
+                  if (completedCount >= 2) ...[
+                    const SizedBox(height: 6),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onPressed: _isMerging ? null : _mergeCompletedParts,
+                      icon: const Icon(Icons.merge_type_rounded),
+                      label: Text(_isMerging ? 'ပေါင်းနေပါသည်...' : '🎞️ ပြီးသမျှ $completedCount ပိုင်းလုံးကို ၁ ပုဒ်တည်း ပေါင်းမယ်'),
+                    ),
+                  ],
+                  if (_mergedOutputPath != null) ...[
+                    const SizedBox(height: 8),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amberAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onPressed: () => _watchRenderedVideo(_mergedOutputPath!, 'YouTube Long Recap (Merged)'),
+                      icon: const Icon(Icons.play_circle_filled),
+                      label: const Text('▶️ ပေါင်းပြီးသား ဗီဒီယိုကို အခုကြည့်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+
+            if (_logs.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black87,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFF262A38)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('📋 Live Log', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+                    const SizedBox(height: 6),
+                    ..._logs.reversed.take(8).map((l) => Text(l, style: const TextStyle(fontSize: 11, color: Colors.white70))),
+                  ],
+                ),
+              ),
+            ],
+
+            if (_errorMsg.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Text('❌ $_errorMsg', style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RenderedVideoDialog extends StatefulWidget {
+  final String videoPath;
+  final String title;
+
+  const _RenderedVideoDialog({required this.videoPath, required this.title});
+
+  @override
+  State<_RenderedVideoDialog> createState() => _RenderedVideoDialogState();
+}
+
+class _RenderedVideoDialogState extends State<_RenderedVideoDialog> {
+  late VideoPlayerController _ctrl;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = VideoPlayerController.file(File(widget.videoPath))
+      ..initialize().then((_) {
+        if (mounted) {
+          setState(() => _ready = true);
+          _ctrl.play();
+        }
+      });
+    _ctrl.addListener(() {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final durMs = _ctrl.value.duration.inMilliseconds.toDouble();
+    final posMs = _ctrl.value.position.inMilliseconds.toDouble().clamp(0.0, durMs > 0 ? durMs : 1.0);
+
+    return Dialog(
+      backgroundColor: const Color(0xFF141720),
+      insetPadding: const EdgeInsets.all(14),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(widget.title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white70),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (!_ready)
+              const Padding(
+                padding: EdgeInsets.all(40),
+                child: CircularProgressIndicator(),
+              )
+            else ...[
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 420),
+                child: AspectRatio(
+                  aspectRatio: _ctrl.value.aspectRatio > 0 ? _ctrl.value.aspectRatio : (16 / 9),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: VideoPlayer(_ctrl),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _ctrl.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                      color: Colors.amberAccent,
+                      size: 34,
+                    ),
+                    onPressed: () => setState(() => _ctrl.value.isPlaying ? _ctrl.pause() : _ctrl.play()),
+                  ),
+                  Text(_fmt(_ctrl.value.position), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                  Expanded(
+                    child: Slider(
+                      value: posMs,
+                      min: 0.0,
+                      max: durMs > 0 ? durMs : 1.0,
+                      onChanged: (v) => _ctrl.seekTo(Duration(milliseconds: v.round())),
+                    ),
+                  ),
+                  Text(_fmt(_ctrl.value.duration), style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 }
