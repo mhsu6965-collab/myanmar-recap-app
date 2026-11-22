@@ -10,7 +10,7 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ 240p 1fps ဖြတ်ထုတ်ပြီး Gemini ကို Scene အတိအကျနဲ့ Script ရေးခိုင်းမည်
+  // ၁။ 240p 1fps ဖြတ်ထုတ်ပြီး ၅ မိနစ်စာ အသေးစိတ် (~၃၀ ခန်း / ၆ စက္ကန့်ခွာ) Script ထုတ်မည်
   Future generateScriptForVideoPart({
     required String videoPath,
     required int partNumber,
@@ -41,8 +41,9 @@ class LongFormService {
 
     final base64Video = base64Encode(await clipFile.readAsBytes());
 
-    final int targetMinLines = (chunkDurSec / 8).round().clamp(10, 45);
-    final int targetMaxLines = (chunkDurSec / 5).round().clamp(15, 60);
+    // ၅ မိနစ် (300s) ဆိုလျှင် ~၂၈–၃၂ ခန်း (တစ်ခန်းလျှင် ~4s ယူပြီး ကြားထဲ ~6s ခွာ)
+    final int targetMinLines = (chunkDurSec / 11).round().clamp(12, 35);
+    final int targetMaxLines = (chunkDurSec / 9).round().clamp(16, 40);
 
     final contextBuf = StringBuffer();
     if (previousSummary.trim().isEmpty) {
@@ -64,15 +65,16 @@ ${contextBuf.toString()}
 
 STRICT REQUIREMENTS:
 1. First line MUST be: SUMMARY: <2-3 short sentences in Burmese summarizing key events & character names so far>
-2. Write detailed, natural Burmese movie recap narration covering the FULL ${chunkDurSec.toStringAsFixed(0)} seconds ($targetMinLines to $targetMaxLines lines).
-3. CRITICAL SYNC RULE: Every [start-end] timestamp MUST match the EXACT second when that visual action/scene happens on screen. Do NOT use evenly spaced dummy timestamps.
-4. Format EVERY narration line strictly as: [start-end] Burmese text
+2. Write VERY DETAILED, engaging Burmese movie recap narration covering the FULL ${chunkDurSec.toStringAsFixed(0)} seconds with $targetMinLines to $targetMaxLines scenes.
+3. COPYRIGHT-SAFE SCENE SPACING: Pick the key 4-second visual moments spaced roughly 6 seconds apart (e.g., [0.0-4.0], [10.0-14.0], [20.0-24.0]) while still narrating every important plot detail smoothly.
+4. CRITICAL SYNC RULE: Every [start-end] timestamp MUST match the EXACT second when that visual action/scene happens on screen.
+5. Format EVERY narration line strictly as: [start-end] Burmese text
    (start and end in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
-5. Example:
+6. Example:
 SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
-[0.0-6.5] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း ဝင်လာခဲ့ပါတယ်။
-[6.5-14.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်ပါတယ်။
-6. No markdown, no bold text, no extra explanations.
+[0.0-4.0] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း သတိကြီးကြီးနဲ့ ဝင်လာခဲ့ပါတယ်။
+[10.0-14.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်ပါတယ်။
+7. No markdown, no bold text, no extra explanations.
 ''';
 
     final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
@@ -130,7 +132,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
                         : segments;
                     final tailLines = tailList.map((e) => e['text'].toString()).join('\n');
 
-                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ကြောင်း)။');
+                    onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ခန်း)။');
                     return {
                       'segments': segments,
                       'summary': newSummary,
@@ -180,7 +182,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
         final e = double.parse(m.group(2)!) + offsetSec;
         segments.add({
           'vStart': s,
-          'vEnd': e > s ? e : s + 3.0,
+          'vEnd': e > s ? e : s + 4.0,
           'text': m.group(3)!.trim(),
         });
       }
@@ -270,7 +272,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     return assPath;
   }
 
-  // ၂။ Zero-Drift Scene Sync + Continuous 6s Play / 3s Freeze & Zoom In/Out ဖြင့် Render ထုတ်မည်
+  // ၂။ Zero-Drift Scene Sync (Clip တစ်ခုထုတ်တိုင်း တကယ့်အရှည် ပြန်တိုင်း) + Max 6s Play / 3s Freeze & Zoom
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -315,10 +317,11 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
       onLog: onLog,
     );
 
-    final vidInfo = await FfmpegService().getVideoInfo(videoPath);
+    final ffmpeg = FfmpegService();
+    final vidInfo = await ffmpeg.getVideoInfo(videoPath);
     final int srcW = vidInfo['width'] as int;
     final int srcH = vidInfo['height'] as int;
-    final double audDur = await FfmpegService().getDuration(audioPath);
+    final double audDur = await ffmpeg.getDuration(audioPath);
 
     final int targetShort = resolution == '1080p' ? 1080 : 720;
     int outW;
@@ -336,20 +339,20 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     int clipCounter = 0;
     bool zoomInToggle = true;
 
-    // Continuous 6s Play / 3s Freeze Timer + Zero-Drift Timeline Tracker
-    double playAcc = 0.0;
-    double freezeRem = 0.0;
+    // Zero-Drift Timeline Tracker (တကယ့်ထွက်လာတဲ့ Clip အရှည်ကို ပြန်တိုင်းပြီး ညှိမည်)
     double targetTotalVid = 0.0;
     double actualTotalVid = 0.0;
+    double playAcc = 0.0;
+    double freezeRem = 0.0;
 
     for (int i = 0; i < syncSegments.length; i++) {
       final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
       final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
-      final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 3.0;
+      final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 4.0;
       final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
 
       targetTotalVid += segAudDur;
-      double remaining = (targetTotalVid - actualTotalVid).clamp(0.2, 60.0);
+      double remaining = (targetTotalVid - actualTotalVid).clamp(0.15, 60.0);
 
       if (!enableCopyrightSafe) {
         final double ratio = (remaining / segVidDur).clamp(0.25, 4.0);
@@ -363,15 +366,16 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
           throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
         }
         clipListBuf.writeln("file '$clipPath'");
-        actualTotalVid += remaining;
+        final realDur = await ffmpeg.getDuration(clipPath);
+        actualTotalVid += (realDur > 0.05 ? realDur : remaining);
       } else {
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Sync + 6s/3s Freeze]...');
+        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Zero-Drift + Max 6s/3s Freeze]...');
         final double safeSpeed = videoSpeed.clamp(0.4, 1.0);
         final double ptsMult = 1.0 / safeSpeed;
         double curSrcPos = vStart;
 
         while (remaining > 0.08) {
-          // (က) Freeze လုပ်ရမယ့်အလှည့် (သို့) လက်ရှိအခန်း vEnd ကုန်သွားရင် Freeze + Zoom In/Out လုပ်မည်
+          // (က) 6s ပြည့်လို့ Freeze အလှည့်ရောက်ရင် (သို့) လက်ရှိအခန်း vEnd ကုန်သွားရင် Freeze + Zoom In/Out
           if (freezeRem > 0.08 || curSrcPos >= vEnd - 0.1) {
             final double fDur = (freezeRem > 0.08)
                 ? (remaining < freezeRem ? remaining : freezeRem)
@@ -397,17 +401,22 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
             final sFreeze = await FFmpegKit.execute(freezeCmd);
             if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
               clipListBuf.writeln("file '$freezePath'");
-              actualTotalVid += fDur;
-            }
-            remaining -= fDur;
-            if (freezeRem > 0.08) {
-              freezeRem = (freezeRem - fDur).clamp(0.0, freezeSec);
+              final realDur = await ffmpeg.getDuration(freezePath);
+              final used = realDur > 0.05 ? realDur : fDur;
+              actualTotalVid += used;
+              remaining -= used;
+              if (freezeRem > 0.08) {
+                freezeRem = (freezeRem - used).clamp(0.0, freezeSec);
+              }
+            } else {
+              remaining -= fDur;
+              freezeRem = 0.0;
             }
             if (freezeRem <= 0.08) {
               playAcc = 0.0;
             }
           } else {
-            // (ခ) Play လုပ်မယ့်အလှည့် (0.65x Speed ဖြင့် 6s ပြည့်သည်အထိ သို့မဟုတ် vEnd အထိ ပြမည်)
+            // (ခ) Max 6s Play (0.65x Speed ဖြင့် 6s ထက်လုံးဝမကျော်ဘဲ ပြမည်)
             final double needPlay = (playSec - playAcc).clamp(0.15, playSec);
             final double maxSrcLeft = (vEnd - curSrcPos).clamp(0.05, 60.0);
             final double maxPlayFromScene = maxSrcLeft * ptsMult;
@@ -426,10 +435,13 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
               throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
             }
             clipListBuf.writeln("file '$playPath'");
-            actualTotalVid += playDur;
+
+            final realDur = await ffmpeg.getDuration(playPath);
+            final used = realDur > 0.05 ? realDur : playDur;
+            actualTotalVid += used;
             curSrcPos += srcNeeded;
-            remaining -= playDur;
-            playAcc += playDur;
+            remaining -= used;
+            playAcc += used;
 
             if (playAcc >= playSec - 0.05) {
               freezeRem = freezeSec;
