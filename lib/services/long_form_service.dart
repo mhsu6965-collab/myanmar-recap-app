@@ -10,11 +10,22 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
+  // Temp ဖိုင်အသေးများကို ဘေးကင်းစွာ ပြန်ဖျက်ပေးမည့် Helper
+  Future<void> _cleanupTempFiles(List<String> paths) async {
+    for (final p in paths) {
+      try {
+        final f = File(p);
+        if (await f.exists()) {
+          await f.delete();
+        }
+      } catch (_) {}
+    }
+  }
+
   // =========================================================================
-  // MODE A: GROQ (အသံထုတ်) + GEMINI (ဗီဒီယိုကြည့် + အတိအကျဘာသာပြန်) DUBBING
+  // MODE A: GROQ (အသံထုတ်) + GEMINI (သဘာဝပြောစကား ဘာသာပြန်) + SMART SYNC DUBBING
   // =========================================================================
 
-  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာရဲ့ အသံကိုဖြတ်ပြီး Groq Whisper ဖြင့် Timestamp + Script ထုတ်မည်
   Future<List> transcribePartWithGroq({
     required String videoPath,
     required int partNumber,
@@ -36,7 +47,6 @@ class LongFormService {
       throw Exception('Part $partNumber အသံဖြတ်ထုတ်မရပါ');
     }
 
-    final audioFile = File(audioClipPath);
     try {
       onLog?.call('Part $partNumber/$totalParts: Groq Whisper ဖြင့် စကားပြော Script ထုတ်နေသည်...');
       final uri = Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions');
@@ -72,13 +82,10 @@ class LongFormService {
       onLog?.call('✅ Part $partNumber: Groq Script ထုတ်ပြီး (${result.length} ကြောင်း)။');
       return result;
     } finally {
-      try {
-        if (await audioFile.exists()) await audioFile.delete();
-      } catch (_) {}
+      await _cleanupTempFiles([audioClipPath]);
     }
   }
 
-  // ၂။ ဗီဒီယိုကို Gemini ကြည့်ခိုင်းပြီး Groq Script ကို မြန်မာလို အတိအကျ ဘာသာပြန်ခိုင်းမည်
   Future generateDubbingScriptForPart({
     required String videoPath,
     required int partNumber,
@@ -91,7 +98,6 @@ class LongFormService {
     required List<String> geminiKeys,
     Function(String)? onLog,
   }) async {
-    // (က) Groq ဖြင့် မူရင်း Script + Timestamp ထုတ်မည်
     final groqSegments = await transcribePartWithGroq(
       videoPath: videoPath,
       partNumber: partNumber,
@@ -115,7 +121,6 @@ class LongFormService {
       transcriptBuf.writeln('[${(s['start'] as double).toStringAsFixed(2)}-${(s['end'] as double).toStringAsFixed(2)}] ${s['text']}');
     }
 
-    // (ခ) Gemini ကြည့်ဖို့ 240p 0.5fps ဗီဒီယိုအသေး ဖြတ်ထုတ်မည်
     final tempDir = Directory.systemTemp;
     final smallClipPath = '${tempDir.path}/gemini_dub_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
@@ -138,9 +143,9 @@ class LongFormService {
     }
 
     final prompt = '''
-You are a professional Burmese movie dubbing translator.
-Watch this video clip (PART $partNumber of $totalParts) to understand the exact scene, speaker gender, tone, and context.
-Then translate EVERY SINGLE LINE of the provided original transcript strictly and accurately into natural spoken Burmese.
+You are a professional Burmese drama dubbing translator.
+Watch this video clip (PART $partNumber of $totalParts) to understand the exact scene, speaker gender, age, relationship (e.g., မေမေ/သား/အစ်ကို/ညီမ/မင်း/ငါ), and emotion.
+Translate EVERY SINGLE LINE of the provided original transcript into NATURAL, SHORT, SPOKEN BURMESE (ပြောစကား — NOT formal/literary Burmese).
 
 ${contextBuf.toString()}
 
@@ -149,12 +154,12 @@ ${transcriptBuf.toString()}
 
 STRICT RULES:
 1. First line MUST be: SUMMARY: <2 short sentences in Burmese summarizing key events & character names so far>
-2. Translate EVERY line from the ORIGINAL TRANSCRIPT faithfully—do NOT skip lines, do NOT merge lines, do NOT invent extra lines.
+2. Translate EVERY line faithfully—do NOT skip lines, do NOT merge lines, do NOT invent extra lines.
 3. KEEP THE EXACT [start-end] TIMESTAMPS UNCHANGED from the original transcript.
-4. Keep Burmese sentences concise and natural so spoken TTS fits inside each [start-end] duration.
+4. Keep every Burmese line SHORT, punchy, and conversational so spoken TTS matches the lip movement duration naturally.
 5. Output format strictly:
 SUMMARY: ...
-[0.00-3.20] မြန်မာဘာသာပြန် စာကြောင်း...
+[0.00-3.20] မေမေ ဒါဆို သားတို့ စိုက်ထားတဲ့ ဆေးပင်တွေနဲ့တင် မလောက်တော့ဘူးနော်။
 6. No markdown, no extra commentary.
 ''';
 
@@ -191,7 +196,7 @@ SUMMARY: ...
                           ]
                         }
                       ],
-                      'generationConfig': {'temperature': 0.2},
+                      'generationConfig': {'temperature': 0.25},
                     }),
                   )
                   .timeout(const Duration(seconds: 120));
@@ -206,7 +211,6 @@ SUMMARY: ...
                     newSummary = summaryMatch.group(1)!.trim();
                   }
 
-                  // Dubbing မှာ Timestamp တွေကို ဒီ Part ရဲ့ Relative (0.0 မှစ) အတိုင်း သိမ်းထားမည်
                   final segments = parseAlignedSegments(out, offsetSec: 0.0);
                   if (segments.isNotEmpty) {
                     final tailList = segments.length >= 2 ? segments.sublist(segments.length - 2) : segments;
@@ -243,13 +247,11 @@ SUMMARY: ...
       }
       throw Exception('Part $partNumber ဘာသာပြန်မရပါ: $lastError');
     } finally {
-      try {
-        if (await clipFile.exists()) await clipFile.delete();
-      } catch (_) {}
+      await _cleanupTempFiles([smallClipPath]);
     }
   }
 
-  // ၃။ Dubbing Render: စာကြောင်းတိုင်းကို မီလီစက္ကန့်အတိအကျ (0.00s Drift) ညှိပြီး ဗီဒီယိုနဲ့ ပေါင်းထုတ်မည်
+  // Smart Sync Dubbing Render: အသံကို အများဆုံး 1.15x ပဲမြန်ပြီး ဗီဒီယိုကို အလိုက်သင့်ညှိပေးမည် (0.00s Drift)
   Future<String> renderDubbingPart({
     required int partNumber,
     required double chunkStartSec,
@@ -275,195 +277,288 @@ SUMMARY: ...
     final tempDir = Directory.systemTemp;
     final ffmpeg = FfmpegService();
     final tts = EdgeTtsService();
+    final List<String> tempFilesToClean = [];
 
-    final audioConcatBuf = StringBuffer();
-    final srtBuf = StringBuffer();
-    double curAudioPos = 0.0;
-    int srtIdx = 1;
+    try {
+      final vidInfo = await ffmpeg.getVideoInfo(videoPath);
+      final int srcW = vidInfo['width'] as int;
+      final int srcH = vidInfo['height'] as int;
 
-    for (int i = 0; i < partSegments.length; i++) {
-      final double relStart = (partSegments[i]['vStart'] as num).toDouble().clamp(0.0, chunkDurSec);
-      final double relEnd = (partSegments[i]['vEnd'] as num).toDouble().clamp(relStart + 0.3, chunkDurSec);
-      final String text = (partSegments[i]['text'] ?? '').toString().trim();
-      if (text.isEmpty) continue;
+      final int targetShort = resolution == '1080p' ? 1080 : 720;
+      int outW;
+      int outH;
+      if (srcH >= srcW) {
+        outW = targetShort;
+        outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
+      } else {
+        outH = targetShort;
+        outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
+      }
 
-      final double nextStart = (i + 1 < partSegments.length)
-          ? (partSegments[i + 1]['vStart'] as num).toDouble().clamp(relEnd, chunkDurSec)
-          : chunkDurSec;
+      final presetFast = '-preset ultrafast -crf 25 -threads 2';
+      final vidConcatBuf = StringBuffer();
+      final audConcatBuf = StringBuffer();
+      final srtBuf = StringBuffer();
 
-      onLog?.call('Part $partNumber: Dubbing TTS (${i + 1}/${partSegments.length}) ထုတ်ညှိနေသည်...');
+      double curSrcPos = 0.0;
+      double curOutTime = 0.0;
+      int clipIdx = 0;
+      int srtIdx = 1;
 
-      // (က) စကားမပြောခင် ကြားကွက်လပ်ကို Silence အတိအကျ ဖြည့်မည်
-      if (relStart > curAudioPos + 0.02) {
-        final double gap = relStart - curAudioPos;
-        final gapPath = '${tempDir.path}/dub_p${partNumber}_gap_$i.m4a';
-        final sGap = await FFmpegKit.execute(
-          '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${gap.toStringAsFixed(3)} -c:a aac -b:a 64k "$gapPath"',
+      for (int i = 0; i < partSegments.length; i++) {
+        final double relStart = (partSegments[i]['vStart'] as num).toDouble().clamp(curSrcPos, chunkDurSec);
+        final double relEnd = (partSegments[i]['vEnd'] as num).toDouble().clamp(relStart + 0.3, chunkDurSec);
+        final String text = (partSegments[i]['text'] ?? '').toString().trim();
+        if (text.isEmpty) continue;
+
+        final double nextStart = (i + 1 < partSegments.length)
+            ? (partSegments[i + 1]['vStart'] as num).toDouble().clamp(relEnd, chunkDurSec)
+            : chunkDurSec;
+
+        onLog?.call('Part $partNumber: Smart Sync (${i + 1}/${partSegments.length}) ထုတ်ညှိနေသည်...');
+
+        // (က) စကားမပြောခင် ကြားကွက်လပ် (1.0x ဗီဒီယို + Silence)
+        if (relStart > curSrcPos + 0.05) {
+          final double gapDur = relStart - curSrcPos;
+          final vGapPath = '${tempDir.path}/dub_p${partNumber}_vg_${clipIdx}.mp4';
+          final aGapPath = '${tempDir.path}/dub_p${partNumber}_ag_${clipIdx}.m4a';
+          clipIdx++;
+          tempFilesToClean.addAll([vGapPath, aGapPath]);
+
+          final sVG = await FFmpegKit.execute(
+            '-y -ss ${(chunkStartSec + curSrcPos).toStringAsFixed(3)} -t ${gapDur.toStringAsFixed(3)} -i "$videoPath" '
+            '-vf "scale=$outW:$outH,fps=30" -an -c:v libx264 $presetFast -pix_fmt yuv420p "$vGapPath"',
+          );
+          if (ReturnCode.isSuccess(await sVG.getReturnCode())) {
+            final realVG = await ffmpeg.getDuration(vGapPath);
+            final usedVG = realVG > 0.03 ? realVG : gapDur;
+            await FFmpegKit.execute(
+              '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${usedVG.toStringAsFixed(3)} -c:a aac -b:a 64k "$aGapPath"',
+            );
+            vidConcatBuf.writeln("file '$vGapPath'");
+            audConcatBuf.writeln("file '$aGapPath'");
+            curOutTime += usedVG;
+          }
+          curSrcPos = relStart;
+        }
+
+        // (ခ) ဒီစာကြောင်းအတွက် TTS ထုတ်မည်
+        final double segSrcEnd = relEnd.clamp(curSrcPos + 0.3, nextStart);
+        final double srcDur = (segSrcEnd - curSrcPos).clamp(0.3, 30.0);
+
+        final rawLinePath = '${tempDir.path}/dub_p${partNumber}_raw_$i.mp3';
+        final dummySrtPath = '${tempDir.path}/dub_p${partNumber}_tmp_$i.srt';
+        tempFilesToClean.addAll([rawLinePath, dummySrtPath]);
+
+        await tts.synthesizeAuto(
+          text: text,
+          voice: voice,
+          ratePercent: ratePercent,
+          pitchHz: pitchHz,
+          audioOutPath: rawLinePath,
+          srtOutPath: dummySrtPath,
         );
-        if (ReturnCode.isSuccess(await sGap.getReturnCode())) {
-          audioConcatBuf.writeln("file '$gapPath'");
-          final realGap = await ffmpeg.getDuration(gapPath);
-          curAudioPos += (realGap > 0.01 ? realGap : gap);
+
+        final double rawAudDur = await ffmpeg.getDuration(rawLinePath);
+        final fitAudPath = '${tempDir.path}/dub_p${partNumber}_af_${clipIdx}.m4a';
+        final fitVidPath = '${tempDir.path}/dub_p${partNumber}_vf_${clipIdx}.mp4';
+        clipIdx++;
+        tempFilesToClean.addAll([fitAudPath, fitVidPath]);
+
+        // Smart Sync: အသံကို အများဆုံး 1.15x ပဲ မြန်ပေးမည် (အသံသဘာဝမပျက်စေရန်)
+        double tempo = 1.0;
+        if (rawAudDur > srcDur) {
+          tempo = (rawAudDur / srcDur).clamp(1.0, 1.15);
+        }
+
+        final aFilter = tempo > 1.01
+            ? 'atempo=${tempo.toStringAsFixed(4)},aresample=24000'
+            : 'aresample=24000';
+
+        await FFmpegKit.execute(
+          '-y -i "$rawLinePath" -af "$aFilter" -ac 1 -ar 24000 -c:a aac -b:a 96k "$fitAudPath"',
+        );
+
+        final double fitAudDur = await ffmpeg.getDuration(fitAudPath);
+        final double safeAudDur = fitAudDur > 0.1 ? fitAudDur : rawAudDur;
+
+        // ဗီဒီယိုကို အသံအရှည်နဲ့ ကွက်တိကိုက်အောင် ညှိမည်
+        if (safeAudDur >= srcDur) {
+          // အသံပိုရှည်နေရင် ဗီဒီယိုကို နည်းနည်းနှေးပေးမည် (0.65x - 0.99x)
+          final double vPtsMult = (safeAudDur / srcDur).clamp(1.0, 1.55);
+          await FFmpegKit.execute(
+            '-y -ss ${(chunkStartSec + curSrcPos).toStringAsFixed(3)} -t ${srcDur.toStringAsFixed(3)} -i "$videoPath" '
+            '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${vPtsMult.toStringAsFixed(6)},fps=30" '
+            '-t ${safeAudDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$fitVidPath"',
+          );
+          vidConcatBuf.writeln("file '$fitVidPath'");
+          audConcatBuf.writeln("file '$fitAudPath'");
+
+          final startMs = (curOutTime * 1000).round();
+          final endMs = ((curOutTime + safeAudDur) * 1000).round();
+          srtBuf.writeln('${srtIdx++}');
+          srtBuf.writeln('${_formatSrtTime(startMs)} --> ${_formatSrtTime(endMs)}');
+          srtBuf.writeln(text);
+          srtBuf.writeln();
+          curOutTime += safeAudDur;
+        } else {
+          // အသံပိုတိုနေရင် ဗီဒီယို 1.0x ပြပြီး အသံနောက်မှာ Silence နည်းနည်းဖြည့်မည်
+          await FFmpegKit.execute(
+            '-y -ss ${(chunkStartSec + curSrcPos).toStringAsFixed(3)} -t ${srcDur.toStringAsFixed(3)} -i "$videoPath" '
+            '-vf "scale=$outW:$outH,fps=30" -an -c:v libx264 $presetFast -pix_fmt yuv420p "$fitVidPath"',
+          );
+          final realVDur = await ffmpeg.getDuration(fitVidPath);
+          final usedVDur = realVDur > 0.1 ? realVDur : srcDur;
+
+          vidConcatBuf.writeln("file '$fitVidPath'");
+          audConcatBuf.writeln("file '$fitAudPath'");
+
+          final startMs = (curOutTime * 1000).round();
+          final endMs = ((curOutTime + safeAudDur) * 1000).round();
+          srtBuf.writeln('${srtIdx++}');
+          srtBuf.writeln('${_formatSrtTime(startMs)} --> ${_formatSrtTime(endMs)}');
+          srtBuf.writeln(text);
+          srtBuf.writeln();
+
+          final double padSil = usedVDur - safeAudDur;
+          if (padSil > 0.03) {
+            final padPath = '${tempDir.path}/dub_p${partNumber}_pad_${clipIdx++}.m4a';
+            tempFilesToClean.add(padPath);
+            await FFmpegKit.execute(
+              '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${padSil.toStringAsFixed(3)} -c:a aac -b:a 64k "$padPath"',
+            );
+            audConcatBuf.writeln("file '$padPath'");
+          }
+          curOutTime += usedVDur;
+        }
+
+        curSrcPos = segSrcEnd;
+      }
+
+      // အဆုံးပိုင်း ကျန်နေသေးရင် 1.0x ဗီဒီယို + Silence ဖြည့်မည်
+      if (chunkDurSec > curSrcPos + 0.08) {
+        final tailDur = chunkDurSec - curSrcPos;
+        final vTailPath = '${tempDir.path}/dub_p${partNumber}_vt.mp4';
+        final aTailPath = '${tempDir.path}/dub_p${partNumber}_at.m4a';
+        tempFilesToClean.addAll([vTailPath, aTailPath]);
+
+        final sVT = await FFmpegKit.execute(
+          '-y -ss ${(chunkStartSec + curSrcPos).toStringAsFixed(3)} -t ${tailDur.toStringAsFixed(3)} -i "$videoPath" '
+          '-vf "scale=$outW:$outH,fps=30" -an -c:v libx264 $presetFast -pix_fmt yuv420p "$vTailPath"',
+        );
+        if (ReturnCode.isSuccess(await sVT.getReturnCode())) {
+          final realVT = await ffmpeg.getDuration(vTailPath);
+          final usedVT = realVT > 0.03 ? realVT : tailDur;
+          await FFmpegKit.execute(
+            '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${usedVT.toStringAsFixed(3)} -c:a aac -b:a 64k "$aTailPath"',
+          );
+          vidConcatBuf.writeln("file '$vTailPath'");
+          audConcatBuf.writeln("file '$aTailPath'");
         }
       }
 
-      // (ခ) ဒီစာကြောင်းအတွက် TTS ထုတ်မည်
-      final rawLinePath = '${tempDir.path}/dub_p${partNumber}_raw_$i.mp3';
-      final dummySrtPath = '${tempDir.path}/dub_p${partNumber}_tmp_$i.srt';
-      await tts.synthesizeAuto(
-        text: text,
-        voice: voice,
-        ratePercent: ratePercent,
-        pitchHz: pitchHz,
-        audioOutPath: rawLinePath,
-        srtOutPath: dummySrtPath,
-      );
+      final vListFile = File('${tempDir.path}/dub_p${partNumber}_vlist.txt');
+      final aListFile = File('${tempDir.path}/dub_p${partNumber}_alist.txt');
+      final rawVidPath = '${tempDir.path}/dub_p${partNumber}_rawv.mp4';
+      final rawAudPath = '${tempDir.path}/dub_p${partNumber}_rawa.m4a';
+      final srtPath = '${tempDir.path}/dub_p${partNumber}_subs.srt';
+      tempFilesToClean.addAll([vListFile.path, aListFile.path, rawVidPath, rawAudPath, srtPath]);
 
-      final double rawDur = await ffmpeg.getDuration(rawLinePath);
-      final double maxSlot = (nextStart - curAudioPos).clamp(0.35, 30.0);
-      final fitLinePath = '${tempDir.path}/dub_p${partNumber}_fit_$i.m4a';
+      await vListFile.writeAsString(vidConcatBuf.toString());
+      await aListFile.writeAsString(audConcatBuf.toString());
+      await File(srtPath).writeAsString(srtBuf.toString(), encoding: utf8);
 
-      // (ဂ) မြန်မာအသံက အချိန်ဘောင်ထက် ရှည်နေရင် atempo နဲ့ ကွက်တိဝင်အောင် ချုံ့မည် (နောက်တစ်ကြောင်း နောက်မကျစေရန်)
-      String aFilter = 'aresample=24000';
-      if (rawDur > maxSlot && maxSlot > 0.35) {
-        final double tempo = (rawDur / maxSlot).clamp(1.0, 2.0);
-        aFilter = 'atempo=${tempo.toStringAsFixed(4)},aresample=24000';
+      final sCV = await FFmpegKit.execute('-y -f concat -safe 0 -i "${vListFile.path}" -c copy "$rawVidPath"');
+      if (!ReturnCode.isSuccess(await sCV.getReturnCode())) {
+        throw Exception('Part $partNumber ဗီဒီယိုအပိုင်းများ ပေါင်းမရပါ');
       }
 
-      final sFit = await FFmpegKit.execute(
-        '-y -i "$rawLinePath" -af "$aFilter" -ac 1 -ar 24000 -c:a aac -b:a 96k "$fitLinePath"',
-      );
-      if (ReturnCode.isSuccess(await sFit.getReturnCode())) {
-        audioConcatBuf.writeln("file '$fitLinePath'");
-        final realDur = await ffmpeg.getDuration(fitLinePath);
-        final usedDur = realDur > 0.05 ? realDur : rawDur;
-
-        final startMs = (curAudioPos * 1000).round();
-        final endMs = ((curAudioPos + usedDur) * 1000).round();
-        srtBuf.writeln('${srtIdx++}');
-        srtBuf.writeln('${_formatSrtTime(startMs)} --> ${_formatSrtTime(endMs)}');
-        srtBuf.writeln(text);
-        srtBuf.writeln();
-
-        curAudioPos += usedDur;
+      final sCA = await FFmpegKit.execute('-y -f concat -safe 0 -i "${aListFile.path}" -c copy "$rawAudPath"');
+      if (!ReturnCode.isSuccess(await sCA.getReturnCode())) {
+        throw Exception('Part $partNumber Dubbing အသံများ ပေါင်းမရပါ');
       }
-    }
 
-    // အဆုံးပိုင်း ကျန်နေသေးရင် Silence ဖြည့်မည်
-    if (chunkDurSec > curAudioPos + 0.05) {
-      final tailGap = chunkDurSec - curAudioPos;
-      final tailPath = '${tempDir.path}/dub_p${partNumber}_tail.m4a';
-      final sTail = await FFmpegKit.execute(
-        '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${tailGap.toStringAsFixed(3)} -c:a aac -b:a 64k "$tailPath"',
-      );
-      if (ReturnCode.isSuccess(await sTail.getReturnCode())) {
-        audioConcatBuf.writeln("file '$tailPath'");
+      final outputPath = '${tempDir.path}/Dubbing_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final filterBuf = StringBuffer();
+      String currentV = '0:v';
+
+      if (enableBlur && blurBox.enabled) {
+        final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
+        final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
+        final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
+        final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
+        filterBuf.writeln(
+          '[$currentV]split[m1][b1];'
+          '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
+          '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
+        );
+        currentV = 'v_blur';
       }
+
+      if (enableMirror) {
+        filterBuf.writeln('[$currentV]hflip[v_flip];');
+        currentV = 'v_flip';
+      }
+
+      if (enableSubtitles && srtBuf.isNotEmpty) {
+        final fontDir = await _prepareFontDir();
+        final assPath = await _convertSrtToAss(
+          srtPath: srtPath,
+          outW: outW,
+          outH: outH,
+          subY: subY,
+          subScale: subScale,
+          subColorAss: subColorAss,
+        );
+        tempFilesToClean.add(assPath);
+        filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
+        currentV = 'v_out';
+      } else if (currentV == '0:v') {
+        filterBuf.writeln('[0:v]null[v_out];');
+        currentV = 'v_out';
+      }
+
+      String audioInputArgs = '-i "$rawAudPath"';
+      if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
+        audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
+        filterBuf.write(
+          '[1:a]aresample=async=1:first_pts=0[tts_a];'
+          '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
+          '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
+        );
+      } else {
+        filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
+      }
+
+      final filterScriptPath = '${tempDir.path}/dub_p${partNumber}_filter.txt';
+      tempFilesToClean.add(filterScriptPath);
+      await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
+
+      onLog?.call('Part $partNumber: Dubbing ဗီဒီယို + မြန်မာစာတန်း ပေါင်းထုတ်နေသည်...');
+      final finalCmd = '-y -i "$rawVidPath" $audioInputArgs '
+          '-filter_complex_script "$filterScriptPath" '
+          '-map "[$currentV]" -map "[a_out]" '
+          '-c:v libx264 $presetFast -pix_fmt yuv420p '
+          '-c:a aac -b:a 128k -movflags +faststart -shortest "$outputPath"';
+
+      final finalSession = await FFmpegKit.execute(finalCmd);
+      if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
+        final logs = await finalSession.getAllLogsAsString();
+        throw Exception('Part $partNumber Dubbing Render မအောင်မြင်ပါ:\n$logs');
+      }
+
+      if (saveToGallery) {
+        try {
+          await Gal.putVideo(outputPath, album: 'Myanmar Recap');
+          onLog?.call('✅ Part $partNumber (Dubbing) ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
+        } catch (_) {}
+      }
+
+      return outputPath;
+    } finally {
+      await _cleanupTempFiles(tempFilesToClean);
+      onLog?.call('🧹 Part $partNumber Temp ဖိုင်များ အလိုအလျောက် ရှင်းလင်းပြီးပါပြီ။');
     }
-
-    final audioListFile = File('${tempDir.path}/dub_p${partNumber}_alist.txt');
-    await audioListFile.writeAsString(audioConcatBuf.toString());
-
-    final finalDubAudioPath = '${tempDir.path}/dub_p${partNumber}_full.m4a';
-    final sConcatA = await FFmpegKit.execute(
-      '-y -f concat -safe 0 -i "${audioListFile.path}" -c copy "$finalDubAudioPath"',
-    );
-    if (!ReturnCode.isSuccess(await sConcatA.getReturnCode())) {
-      throw Exception('Part $partNumber Dubbing အသံများ ပေါင်းမရပါ');
-    }
-
-    final srtPath = '${tempDir.path}/dub_p${partNumber}_subs.srt';
-    await File(srtPath).writeAsString(srtBuf.toString(), encoding: utf8);
-
-    // (ဃ) ဗီဒီယိုနဲ့ အသံ + စာတန်း + Mirror + Blur + BGM ပေါင်းထုတ်မည်
-    final vidInfo = await ffmpeg.getVideoInfo(videoPath);
-    final int srcW = vidInfo['width'] as int;
-    final int srcH = vidInfo['height'] as int;
-
-    final int targetShort = resolution == '1080p' ? 1080 : 720;
-    int outW;
-    int outH;
-    if (srcH >= srcW) {
-      outW = targetShort;
-      outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
-    } else {
-      outH = targetShort;
-      outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
-    }
-
-    final outputPath = '${tempDir.path}/Dubbing_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
-    final filterBuf = StringBuffer();
-    filterBuf.writeln('[0:v]scale=$outW:$outH,fps=30[v_scaled];');
-    String currentV = 'v_scaled';
-
-    if (enableBlur && blurBox.enabled) {
-      final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
-      final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
-      final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
-      final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
-      filterBuf.writeln(
-        '[$currentV]split[m1][b1];'
-        '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
-        '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
-      );
-      currentV = 'v_blur';
-    }
-
-    if (enableMirror) {
-      filterBuf.writeln('[$currentV]hflip[v_flip];');
-      currentV = 'v_flip';
-    }
-
-    if (enableSubtitles && srtBuf.isNotEmpty) {
-      final fontDir = await _prepareFontDir();
-      final assPath = await _convertSrtToAss(
-        srtPath: srtPath,
-        outW: outW,
-        outH: outH,
-        subY: subY,
-        subScale: subScale,
-        subColorAss: subColorAss,
-      );
-      filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
-      currentV = 'v_out';
-    }
-
-    String audioInputArgs = '-i "$finalDubAudioPath"';
-    if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
-      audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
-      filterBuf.write(
-        '[1:a]aresample=async=1:first_pts=0[tts_a];'
-        '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
-        '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
-      );
-    } else {
-      filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
-    }
-
-    final filterScriptPath = '${tempDir.path}/dub_p${partNumber}_filter.txt';
-    await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
-
-    onLog?.call('Part $partNumber: Dubbing ဗီဒီယို Render ထုတ်နေသည်...');
-    final finalCmd = '-y -ss ${chunkStartSec.toStringAsFixed(3)} -t ${chunkDurSec.toStringAsFixed(3)} -i "$videoPath" $audioInputArgs '
-        '-filter_complex_script "$filterScriptPath" '
-        '-map "[$currentV]" -map "[a_out]" '
-        '-c:v libx264 -preset ultrafast -crf 25 -threads 2 -pix_fmt yuv420p '
-        '-c:a aac -b:a 128k -movflags +faststart -t ${chunkDurSec.toStringAsFixed(3)} "$outputPath"';
-
-    final finalSession = await FFmpegKit.execute(finalCmd);
-    if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
-      final logs = await finalSession.getAllLogsAsString();
-      throw Exception('Part $partNumber Dubbing Render မအောင်မြင်ပါ:\n$logs');
-    }
-
-    if (saveToGallery) {
-      try {
-        await Gal.putVideo(outputPath, album: 'Myanmar Recap');
-        onLog?.call('✅ Part $partNumber (Dubbing) ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
-      } catch (_) {}
-    }
-
-    return outputPath;
   }
 
   String _formatSrtTime(int ms) {
@@ -625,9 +720,7 @@ STRICT REQUIREMENTS:
       }
       throw Exception('Part $partNumber မအောင်မြင်ပါ: $lastError');
     } finally {
-      try {
-        if (await clipFile.exists()) await clipFile.delete();
-      } catch (_) {}
+      await _cleanupTempFiles([smallClipPath]);
     }
   }
 
@@ -691,7 +784,7 @@ STRICT REQUIREMENTS:
     required String subColorAss,
   }) async {
     final srtContent = await File(srtPath).readAsString(encoding: utf8);
-    final assPath = '${Directory.systemTemp.path}/long_subs.ass';
+    final assPath = '${Directory.systemTemp.path}/long_subs_${DateTime.now().millisecondsSinceEpoch}.ass';
 
     final baseFontSize = outH * 0.052;
     final fontSize = (baseFontSize * subScale).round().clamp(20, 180);
@@ -758,244 +851,260 @@ STRICT REQUIREMENTS:
     Function(String)? onLog,
   }) async {
     final tempDir = Directory.systemTemp;
-    final partScriptBuf = StringBuffer();
-    for (final seg in partSegments) {
-      partScriptBuf.writeln('[${seg['vStart']}-${seg['vEnd']}] ${seg['text']}');
-    }
+    final List<String> tempFilesToClean = [];
 
-    final audioPath = '${tempDir.path}/part_${partNumber}_tts.mp3';
-    final srtPath = '${tempDir.path}/part_${partNumber}_subs.srt';
+    try {
+      final partScriptBuf = StringBuffer();
+      for (final seg in partSegments) {
+        partScriptBuf.writeln('[${seg['vStart']}-${seg['vEnd']}] ${seg['text']}');
+      }
 
-    onLog?.call('Part $partNumber: Edge TTS အသံထုတ်နေသည်...');
-    final syncSegments = await EdgeTtsService().synthesizeAuto(
-      text: partScriptBuf.toString().trim(),
-      voice: voice,
-      ratePercent: ratePercent,
-      pitchHz: pitchHz,
-      audioOutPath: audioPath,
-      srtOutPath: srtPath,
-      onLog: onLog,
-    );
+      final audioPath = '${tempDir.path}/part_${partNumber}_tts.mp3';
+      final srtPath = '${tempDir.path}/part_${partNumber}_subs.srt';
+      tempFilesToClean.addAll([audioPath, srtPath]);
 
-    final ffmpeg = FfmpegService();
-    final vidInfo = await ffmpeg.getVideoInfo(videoPath);
-    final int srcW = vidInfo['width'] as int;
-    final int srcH = vidInfo['height'] as int;
-    final double audDur = await ffmpeg.getDuration(audioPath);
+      onLog?.call('Part $partNumber: Edge TTS အသံထုတ်နေသည်...');
+      final syncSegments = await EdgeTtsService().synthesizeAuto(
+        text: partScriptBuf.toString().trim(),
+        voice: voice,
+        ratePercent: ratePercent,
+        pitchHz: pitchHz,
+        audioOutPath: audioPath,
+        srtOutPath: srtPath,
+        onLog: onLog,
+      );
 
-    final int targetShort = resolution == '1080p' ? 1080 : 720;
-    int outW;
-    int outH;
-    if (srcH >= srcW) {
-      outW = targetShort;
-      outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
-    } else {
-      outH = targetShort;
-      outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
-    }
+      final ffmpeg = FfmpegService();
+      final vidInfo = await ffmpeg.getVideoInfo(videoPath);
+      final int srcW = vidInfo['width'] as int;
+      final int srcH = vidInfo['height'] as int;
+      final double audDur = await ffmpeg.getDuration(audioPath);
 
-    final clipListBuf = StringBuffer();
-    final presetFast = '-preset ultrafast -crf 25 -threads 2';
-    int clipCounter = 0;
-    bool zoomInToggle = true;
-
-    double targetTotalVid = 0.0;
-    double actualTotalVid = 0.0;
-    double playAcc = 0.0;
-    double freezeRem = 0.0;
-
-    for (int i = 0; i < syncSegments.length; i++) {
-      final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
-      final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
-      final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 4.0;
-      final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
-
-      targetTotalVid += segAudDur;
-      double remaining = (targetTotalVid - actualTotalVid).clamp(0.15, 60.0);
-
-      if (!enableCopyrightSafe) {
-        final double ratio = (remaining / segVidDur).clamp(0.25, 4.0);
-        final clipPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
-        final cmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
-            '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
-            '-t ${remaining.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
-        final s = await FFmpegKit.execute(cmd);
-        if (!ReturnCode.isSuccess(await s.getReturnCode())) {
-          throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
-        }
-        clipListBuf.writeln("file '$clipPath'");
-        final realDur = await ffmpeg.getDuration(clipPath);
-        actualTotalVid += (realDur > 0.05 ? realDur : remaining);
+      final int targetShort = resolution == '1080p' ? 1080 : 720;
+      int outW;
+      int outH;
+      if (srcH >= srcW) {
+        outW = targetShort;
+        outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
       } else {
-        onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Zero-Drift + Max 6s/3s Freeze]...');
-        final double safeSpeed = videoSpeed.clamp(0.4, 1.0);
-        final double ptsMult = 1.0 / safeSpeed;
-        double curSrcPos = vStart;
+        outH = targetShort;
+        outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
+      }
 
-        while (remaining > 0.08) {
-          if (freezeRem > 0.08 || curSrcPos >= vEnd - 0.1) {
-            final double fDur = (freezeRem > 0.08)
-                ? (remaining < freezeRem ? remaining : freezeRem)
-                : remaining;
-            final int totalFrames = (fDur * 30).round().clamp(5, 600);
-            final double freezeAt = curSrcPos.clamp(vStart, vEnd);
-            final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
-            final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+      final clipListBuf = StringBuffer();
+      final presetFast = '-preset ultrafast -crf 25 -threads 2';
+      int clipCounter = 0;
+      bool zoomInToggle = true;
 
-            await FFmpegKit.execute(
-              '-y -ss ${freezeAt.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
-            );
+      double targetTotalVid = 0.0;
+      double actualTotalVid = 0.0;
+      double playAcc = 0.0;
+      double freezeRem = 0.0;
 
-            final zoomExpr = zoomInToggle
-                ? "min(zoom+0.0022,1.22)"
-                : "if(lte(on,1),1.22,max(1.0,zoom-0.0022))";
-            zoomInToggle = !zoomInToggle;
+      for (int i = 0; i < syncSegments.length; i++) {
+        final double vStart = (syncSegments[i]['vStart'] as num).toDouble();
+        final double vEnd = (syncSegments[i]['vEnd'] as num).toDouble();
+        final double segVidDur = (vEnd - vStart) > 0.3 ? (vEnd - vStart) : 4.0;
+        final double segAudDur = (syncSegments[i]['audDur'] as num).toDouble();
 
-            final freezeCmd = '-y -i "$frameImg" '
-                '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
-                '-t ${fDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
+        targetTotalVid += segAudDur;
+        double remaining = (targetTotalVid - actualTotalVid).clamp(0.15, 60.0);
 
-            final sFreeze = await FFmpegKit.execute(freezeCmd);
-            if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
-              clipListBuf.writeln("file '$freezePath'");
-              final realDur = await ffmpeg.getDuration(freezePath);
-              final used = realDur > 0.05 ? realDur : fDur;
-              actualTotalVid += used;
-              remaining -= used;
-              if (freezeRem > 0.08) {
-                freezeRem = (freezeRem - used).clamp(0.0, freezeSec);
+        if (!enableCopyrightSafe) {
+          final double ratio = (remaining / segVidDur).clamp(0.25, 4.0);
+          final clipPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+          tempFilesToClean.add(clipPath);
+          onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) ဖြတ်ညှိနေသည်...');
+          final cmd = '-y -ss ${vStart.toStringAsFixed(3)} -t ${segVidDur.toStringAsFixed(3)} -i "$videoPath" '
+              '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ratio.toStringAsFixed(6)},fps=30" '
+              '-t ${remaining.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$clipPath"';
+          final s = await FFmpegKit.execute(cmd);
+          if (!ReturnCode.isSuccess(await s.getReturnCode())) {
+            throw Exception('Part $partNumber Clip $i ဖြတ်မရပါ');
+          }
+          clipListBuf.writeln("file '$clipPath'");
+          final realDur = await ffmpeg.getDuration(clipPath);
+          actualTotalVid += (realDur > 0.05 ? realDur : remaining);
+        } else {
+          onLog?.call('Part $partNumber: အခန်း (${i + 1}/${syncSegments.length}) [Zero-Drift + Max 6s/3s Freeze]...');
+          final double safeSpeed = videoSpeed.clamp(0.4, 1.0);
+          final double ptsMult = 1.0 / safeSpeed;
+          double curSrcPos = vStart;
+
+          while (remaining > 0.08) {
+            if (freezeRem > 0.08 || curSrcPos >= vEnd - 0.1) {
+              final double fDur = (freezeRem > 0.08)
+                  ? (remaining < freezeRem ? remaining : freezeRem)
+                  : remaining;
+              final int totalFrames = (fDur * 30).round().clamp(5, 600);
+              final double freezeAt = curSrcPos.clamp(vStart, vEnd);
+              final frameImg = '${tempDir.path}/p${partNumber}_f_$clipCounter.jpg';
+              final freezePath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+              tempFilesToClean.addAll([frameImg, freezePath]);
+
+              await FFmpegKit.execute(
+                '-y -ss ${freezeAt.toStringAsFixed(3)} -i "$videoPath" -frames:v 1 -q:v 2 "$frameImg"',
+              );
+
+              final zoomExpr = zoomInToggle
+                  ? "min(zoom+0.0022,1.22)"
+                  : "if(lte(on,1),1.22,max(1.0,zoom-0.0022))";
+              zoomInToggle = !zoomInToggle;
+
+              final freezeCmd = '-y -i "$frameImg" '
+                  '-vf "scale=$outW:$outH,zoompan=z=\'$zoomExpr\':x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\':d=$totalFrames:s=${outW}x$outH:fps=30" '
+                  '-t ${fDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$freezePath"';
+
+              final sFreeze = await FFmpegKit.execute(freezeCmd);
+              if (ReturnCode.isSuccess(await sFreeze.getReturnCode())) {
+                clipListBuf.writeln("file '$freezePath'");
+                final realDur = await ffmpeg.getDuration(freezePath);
+                final used = realDur > 0.05 ? realDur : fDur;
+                actualTotalVid += used;
+                remaining -= used;
+                if (freezeRem > 0.08) {
+                  freezeRem = (freezeRem - used).clamp(0.0, freezeSec);
+                }
+              } else {
+                remaining -= fDur;
+                freezeRem = 0.0;
+              }
+              if (freezeRem <= 0.08) {
+                playAcc = 0.0;
               }
             } else {
-              remaining -= fDur;
-              freezeRem = 0.0;
-            }
-            if (freezeRem <= 0.08) {
-              playAcc = 0.0;
-            }
-          } else {
-            final double needPlay = (playSec - playAcc).clamp(0.15, playSec);
-            final double maxSrcLeft = (vEnd - curSrcPos).clamp(0.05, 60.0);
-            final double maxPlayFromScene = maxSrcLeft * ptsMult;
+              final double needPlay = (playSec - playAcc).clamp(0.15, playSec);
+              final double maxSrcLeft = (vEnd - curSrcPos).clamp(0.05, 60.0);
+              final double maxPlayFromScene = maxSrcLeft * ptsMult;
 
-            double playDur = remaining < needPlay ? remaining : needPlay;
-            if (playDur > maxPlayFromScene) playDur = maxPlayFromScene;
+              double playDur = remaining < needPlay ? remaining : needPlay;
+              if (playDur > maxPlayFromScene) playDur = maxPlayFromScene;
 
-            final double srcNeeded = (playDur * safeSpeed).clamp(0.05, maxSrcLeft);
-            final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
-            final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.15).toStringAsFixed(3)} -i "$videoPath" '
-                '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
-                '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
+              final double srcNeeded = (playDur * safeSpeed).clamp(0.05, maxSrcLeft);
+              final playPath = '${tempDir.path}/p${partNumber}_c${clipCounter++}.mp4';
+              tempFilesToClean.add(playPath);
 
-            final sPlay = await FFmpegKit.execute(playCmd);
-            if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
-              throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
-            }
-            clipListBuf.writeln("file '$playPath'");
+              final playCmd = '-y -ss ${curSrcPos.toStringAsFixed(3)} -t ${(srcNeeded + 0.15).toStringAsFixed(3)} -i "$videoPath" '
+                  '-vf "scale=$outW:$outH,setpts=(PTS-STARTPTS)*${ptsMult.toStringAsFixed(6)},fps=30" '
+                  '-t ${playDur.toStringAsFixed(3)} -an -c:v libx264 $presetFast -pix_fmt yuv420p "$playPath"';
 
-            final realDur = await ffmpeg.getDuration(playPath);
-            final used = realDur > 0.05 ? realDur : playDur;
-            actualTotalVid += used;
-            curSrcPos += srcNeeded;
-            remaining -= used;
-            playAcc += used;
+              final sPlay = await FFmpegKit.execute(playCmd);
+              if (!ReturnCode.isSuccess(await sPlay.getReturnCode())) {
+                throw Exception('Part $partNumber Play Clip မအောင်မြင်ပါ');
+              }
+              clipListBuf.writeln("file '$playPath'");
 
-            if (playAcc >= playSec - 0.05) {
-              freezeRem = freezeSec;
-              playAcc = 0.0;
+              final realDur = await ffmpeg.getDuration(playPath);
+              final used = realDur > 0.05 ? realDur : playDur;
+              actualTotalVid += used;
+              curSrcPos += srcNeeded;
+              remaining -= used;
+              playAcc += used;
+
+              if (playAcc >= playSec - 0.05) {
+                freezeRem = freezeSec;
+                playAcc = 0.0;
+              }
             }
           }
         }
       }
-    }
 
-    final listFile = File('${tempDir.path}/p${partNumber}_list.txt');
-    await listFile.writeAsString(clipListBuf.toString());
+      final listFile = File('${tempDir.path}/p${partNumber}_list.txt');
+      tempFilesToClean.add(listFile.path);
+      await listFile.writeAsString(clipListBuf.toString());
 
-    final rawConcatPath = '${tempDir.path}/p${partNumber}_raw.mp4';
-    final concatSession = await FFmpegKit.execute(
-      '-y -f concat -safe 0 -i "${listFile.path}" -c copy "$rawConcatPath"',
-    );
-    if (!ReturnCode.isSuccess(await concatSession.getReturnCode())) {
-      throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
-    }
-
-    final outputPath = '${tempDir.path}/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
-
-    final filterBuf = StringBuffer();
-    String currentV = '0:v';
-
-    if (enableBlur && blurBox.enabled) {
-      final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
-      final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
-      final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
-      final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
-      filterBuf.writeln(
-        '[$currentV]split[m1][b1];'
-        '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
-        '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
+      final rawConcatPath = '${tempDir.path}/p${partNumber}_raw.mp4';
+      tempFilesToClean.add(rawConcatPath);
+      final concatSession = await FFmpegKit.execute(
+        '-y -f concat -safe 0 -i "${listFile.path}" -c copy "$rawConcatPath"',
       );
-      currentV = 'v_blur';
+      if (!ReturnCode.isSuccess(await concatSession.getReturnCode())) {
+        throw Exception('Part $partNumber Clip များ ပြန်ဆက်မရပါ');
+      }
+
+      final outputPath = '${tempDir.path}/Recap_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+
+      final filterBuf = StringBuffer();
+      String currentV = '0:v';
+
+      if (enableBlur && blurBox.enabled) {
+        final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
+        final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
+        final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
+        final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
+        filterBuf.writeln(
+          '[$currentV]split[m1][b1];'
+          '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
+          '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
+        );
+        currentV = 'v_blur';
+      }
+
+      if (enableMirror) {
+        filterBuf.writeln('[$currentV]hflip[v_flip];');
+        currentV = 'v_flip';
+      }
+
+      if (enableSubtitles) {
+        final fontDir = await _prepareFontDir();
+        final assPath = await _convertSrtToAss(
+          srtPath: srtPath,
+          outW: outW,
+          outH: outH,
+          subY: subY,
+          subScale: subScale,
+          subColorAss: subColorAss,
+        );
+        tempFilesToClean.add(assPath);
+        filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
+        currentV = 'v_out';
+      } else if (currentV == '0:v') {
+        filterBuf.writeln('[0:v]null[v_out];');
+        currentV = 'v_out';
+      }
+
+      String audioInputArgs = '-i "$audioPath"';
+      if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
+        audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
+        filterBuf.write(
+          '[1:a]aresample=async=1:first_pts=0[tts_a];'
+          '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
+          '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
+        );
+      } else {
+        filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
+      }
+
+      final filterScriptPath = '${tempDir.path}/p${partNumber}_filter.txt';
+      tempFilesToClean.add(filterScriptPath);
+      await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
+
+      onLog?.call('Part $partNumber: အသံ၊ စာတန်း နှင့် BGM ပေါင်းထုတ်နေသည်...');
+      final finalCmd = '-y -i "$rawConcatPath" $audioInputArgs '
+          '-filter_complex_script "$filterScriptPath" '
+          '-map "[$currentV]" -map "[a_out]" '
+          '-c:v libx264 $presetFast -pix_fmt yuv420p '
+          '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
+
+      final finalSession = await FFmpegKit.execute(finalCmd);
+      if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
+        final logs = await finalSession.getAllLogsAsString();
+        throw Exception('Part $partNumber Render မအောင်မြင်ပါ:\n$logs');
+      }
+
+      if (saveToGallery) {
+        try {
+          await Gal.putVideo(outputPath, album: 'Myanmar Recap');
+          onLog?.call('✅ Part $partNumber ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
+        } catch (_) {}
+      }
+
+      return outputPath;
+    } finally {
+      await _cleanupTempFiles(tempFilesToClean);
+      onLog?.call('🧹 Part $partNumber Temp ဖိုင်များ အလိုအလျောက် ရှင်းလင်းပြီးပါပြီ။');
     }
-
-    if (enableMirror) {
-      filterBuf.writeln('[$currentV]hflip[v_flip];');
-      currentV = 'v_flip';
-    }
-
-    if (enableSubtitles) {
-      final fontDir = await _prepareFontDir();
-      final assPath = await _convertSrtToAss(
-        srtPath: srtPath,
-        outW: outW,
-        outH: outH,
-        subY: subY,
-        subScale: subScale,
-        subColorAss: subColorAss,
-      );
-      filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
-      currentV = 'v_out';
-    } else if (currentV == '0:v') {
-      filterBuf.writeln('[0:v]null[v_out];');
-      currentV = 'v_out';
-    }
-
-    String audioInputArgs = '-i "$audioPath"';
-    if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
-      audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
-      filterBuf.write(
-        '[1:a]aresample=async=1:first_pts=0[tts_a];'
-        '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
-        '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
-      );
-    } else {
-      filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
-    }
-
-    final filterScriptPath = '${tempDir.path}/p${partNumber}_filter.txt';
-    await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
-
-    onLog?.call('Part $partNumber: အသံ၊ စာတန်း နှင့် BGM ပေါင်းထုတ်နေသည်...');
-    final finalCmd = '-y -i "$rawConcatPath" $audioInputArgs '
-        '-filter_complex_script "$filterScriptPath" '
-        '-map "[$currentV]" -map "[a_out]" '
-        '-c:v libx264 $presetFast -pix_fmt yuv420p '
-        '-c:a aac -b:a 128k -movflags +faststart -t ${audDur.toStringAsFixed(3)} "$outputPath"';
-
-    final finalSession = await FFmpegKit.execute(finalCmd);
-    if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
-      final logs = await finalSession.getAllLogsAsString();
-      throw Exception('Part $partNumber Render မအောင်မြင်ပါ:\n$logs');
-    }
-
-    if (saveToGallery) {
-      try {
-        await Gal.putVideo(outputPath, album: 'Myanmar Recap');
-        onLog?.call('✅ Part $partNumber ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
-      } catch (_) {}
-    }
-
-    return outputPath;
   }
 
   // Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
@@ -1013,19 +1122,23 @@ STRICT REQUIREMENTS:
 
     final mergedPath = '${tempDir.path}/YouTube_LongRecap_${DateTime.now().millisecondsSinceEpoch}.mp4';
 
-    onLog?.call('Part ${partPaths.length} ခုလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းနေသည်...');
-    final session = await FFmpegKit.execute(
-      '-y -f concat -safe 0 -i "${listFile.path}" -c copy -movflags +faststart "$mergedPath"',
-    );
-    if (!ReturnCode.isSuccess(await session.getReturnCode())) {
-      throw Exception('Part များ ပေါင်း၍မရပါ');
-    }
-
     try {
-      await Gal.putVideo(mergedPath, album: 'Myanmar Recap');
-      onLog?.call('✅ YouTube Long Recap ကို Gallery ထဲ သိမ်းပြီးပါပြီ!');
-    } catch (_) {}
+      onLog?.call('Part ${partPaths.length} ခုလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းနေသည်...');
+      final session = await FFmpegKit.execute(
+        '-y -f concat -safe 0 -i "${listFile.path}" -c copy -movflags +faststart "$mergedPath"',
+      );
+      if (!ReturnCode.isSuccess(await session.getReturnCode())) {
+        throw Exception('Part များ ပေါင်း၍မရပါ');
+      }
 
-    return mergedPath;
+      try {
+        await Gal.putVideo(mergedPath, album: 'Myanmar Recap');
+        onLog?.call('✅ YouTube Long Recap ကို Gallery ထဲ သိမ်းပြီးပါပြီ!');
+      } catch (_) {}
+
+      return mergedPath;
+    } finally {
+      await _cleanupTempFiles([listFile.path]);
+    }
   }
 }
