@@ -45,6 +45,10 @@ class _LongFormPageState extends State<LongFormPage> {
   final _geminiCtrl = TextEditingController();
   final _groqCtrl = TextEditingController();
 
+  // Script Editor State
+  final _scriptEditCtrl = TextEditingController();
+  int? _editingPartIndex;
+
   // Mode: 'dubbing' (Groq + Gemini ဘာသာပြန်) | 'recap' (Gemini Recap + 6s/3s Freeze)
   String _workMode = 'dubbing';
 
@@ -102,6 +106,7 @@ class _LongFormPageState extends State<LongFormPage> {
     _videoController?.dispose();
     _geminiCtrl.dispose();
     _groqCtrl.dispose();
+    _scriptEditCtrl.dispose();
     super.dispose();
   }
 
@@ -156,6 +161,52 @@ class _LongFormPageState extends State<LongFormPage> {
     });
   }
 
+  // Script Editor ထဲသို့ ရွေးထားသော Part ၏ Script ကို ထည့်ပေးမည်
+  void _openScriptEditor(int index) {
+    final item = _parts[index];
+    if (item.alignedSegments == null || item.alignedSegments!.isEmpty) return;
+
+    final buf = StringBuffer();
+    for (final seg in item.alignedSegments!) {
+      final s = (seg['vStart'] as num).toDouble().toStringAsFixed(2);
+      final e = (seg['vEnd'] as num).toDouble().toStringAsFixed(2);
+      final txt = (seg['text'] ?? '').toString().trim();
+      buf.writeln('[$s-$e] $txt');
+    }
+
+    setState(() {
+      _editingPartIndex = index;
+      _scriptEditCtrl.text = buf.toString().trim();
+    });
+  }
+
+  // ပြင်ဆင်ပြီးသား Script ကို ပြန်သိမ်းမည်
+  void _saveEditedScript() {
+    if (_editingPartIndex == null || _editingPartIndex! >= _parts.length) return;
+    final parsed = LongFormService().parseAlignedSegments(_scriptEditCtrl.text, offsetSec: 0.0);
+    if (parsed.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚠️ [0.00-3.00] စာသား ပုံစံအတိုင်း မှန်အောင် ရေးပေးပါ'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    final idx = _editingPartIndex!;
+    setState(() {
+      _parts[idx].alignedSegments = parsed;
+    });
+    _addLog('✏️ Part ${_parts[idx].partNumber} Script ကို ပြင်ဆင်သိမ်းဆည်းပြီး (${parsed.length} ကြောင်း)။');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('✅ Part ${_parts[idx].partNumber} Script (${parsed.length} ကြောင်း) သိမ်းပြီးပါပြီ!'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
   Future<void> _pickVideo() async {
     setState(() => _errorMsg = '');
     final file = await FilePicker.pickFile(type: FileType.video);
@@ -169,6 +220,8 @@ class _LongFormPageState extends State<LongFormPage> {
         _videoTotalSec = 0.0;
         _mergedOutputPath = null;
         _parts.clear();
+        _editingPartIndex = null;
+        _scriptEditCtrl.clear();
       });
 
       try {
@@ -235,6 +288,8 @@ class _LongFormPageState extends State<LongFormPage> {
         _mergedOutputPath = null;
         _logs.clear();
         _parts.clear();
+        _editingPartIndex = null;
+        _scriptEditCtrl.clear();
       }
     });
 
@@ -365,6 +420,9 @@ class _LongFormPageState extends State<LongFormPage> {
           item.tailLines = (result['tailLines'] ?? '').toString();
           item.status = 'ready';
         });
+        if (_editingPartIndex == null) {
+          _openScriptEditor(index);
+        }
       }
       return true;
     } catch (e) {
@@ -726,7 +784,7 @@ class _LongFormPageState extends State<LongFormPage> {
                   items: const [
                     DropdownMenuItem(
                       value: 'dubbing',
-                      child: Text('🎙️ Dubbing Mode (Groq အသံထုတ် + Gemini ဘာသာပြန် + 0.00s Sync)'),
+                      child: Text('🎙️ Dubbing Mode (Groq အသံထုတ် + Gemini ဘာသာပြန် + Smart Sync)'),
                     ),
                     DropdownMenuItem(
                       value: 'recap',
@@ -741,6 +799,8 @@ class _LongFormPageState extends State<LongFormPage> {
                               _workMode = v;
                               _parts.clear();
                               _mergedOutputPath = null;
+                              _editingPartIndex = null;
+                              _scriptEditCtrl.clear();
                             });
                           }
                         },
@@ -980,95 +1040,122 @@ class _LongFormPageState extends State<LongFormPage> {
             if (_parts.isNotEmpty) ...[
               const SizedBox(height: 14),
               _buildCard(
-                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပြီး ကြည့်ပါ (${_parts.length} ပိုင်း)',
+                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပါ (${_parts.length} ပိုင်း • Scroll ဆွဲကြည့်ပါ)',
                 icon: Icons.playlist_play_rounded,
                 children: [
-                  ...List.generate(_parts.length, (i) {
-                    final item = _parts[i];
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF11131A),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: item.outputPath != null
-                              ? Colors.greenAccent.withOpacity(0.5)
-                              : item.status == 'error'
-                                  ? Colors.redAccent.withOpacity(0.6)
-                                  : const Color(0xFF262A38),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                  // Scrollable Parts Box
+                  Container(
+                    height: 300,
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0E1016),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF262A38)),
+                    ),
+                    child: Scrollbar(
+                      thumbVisibility: true,
+                      child: ListView.builder(
+                        itemCount: _parts.length,
+                        itemBuilder: (context, i) {
+                          final item = _parts[i];
+                          final isEditing = _editingPartIndex == i;
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isEditing ? const Color(0xFF1C2333) : const Color(0xFF141720),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: isEditing
+                                    ? Colors.amberAccent
+                                    : item.outputPath != null
+                                        ? Colors.greenAccent.withOpacity(0.5)
+                                        : item.status == 'error'
+                                            ? Colors.redAccent.withOpacity(0.6)
+                                            : const Color(0xFF262A38),
+                              ),
+                            ),
+                            child: Row(
                               children: [
-                                Text(
-                                  'Part ${item.partNumber} (${_formatSecRange(item.startSec, item.durSec)})',
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'Part ${item.partNumber} (${_formatSecRange(item.startSec, item.durSec)})',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      if (item.status == 'pending')
+                                        const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
+                                      else if (item.status == 'generating')
+                                        Text(
+                                          _workMode == 'dubbing'
+                                              ? '🎙️ Groq + Gemini ဘာသာပြန်နေသည်...'
+                                              : '👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...',
+                                          style: const TextStyle(fontSize: 11, color: Colors.amberAccent),
+                                        )
+                                      else if (item.status == 'error')
+                                        const Text('❌ မအောင်မြင်ပါ (Retry နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
+                                      else if (item.outputPath != null)
+                                        const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
+                                      else
+                                        Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                                    ],
+                                  ),
                                 ),
-                                const SizedBox(height: 2),
-                                if (item.status == 'pending')
-                                  const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
-                                else if (item.status == 'generating')
-                                  Text(
-                                    _workMode == 'dubbing'
-                                        ? '🎙️ Groq + Gemini ဘာသာပြန်နေသည်...'
-                                        : '👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...',
-                                    style: const TextStyle(fontSize: 11, color: Colors.amberAccent),
+                                if (item.status == 'ready')
+                                  IconButton(
+                                    tooltip: 'Script ပြင်မယ်',
+                                    icon: Icon(
+                                      Icons.edit_note_rounded,
+                                      color: isEditing ? Colors.amberAccent : Colors.lightBlueAccent,
+                                      size: 26,
+                                    ),
+                                    onPressed: () => _openScriptEditor(i),
+                                  ),
+                                if (item.outputPath != null)
+                                  IconButton(
+                                    tooltip: 'ဗီဒီယိုကြည့်မယ်',
+                                    icon: const Icon(Icons.play_circle_fill, color: Colors.amberAccent, size: 28),
+                                    onPressed: () => _watchRenderedVideo(item.outputPath!, 'Part ${item.partNumber} Render Video'),
+                                  ),
+                                if (item.status == 'error')
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
+                                    onPressed: _isGeneratingAll ? null : () => _retryPart(i),
+                                    icon: const Icon(Icons.refresh, size: 16),
+                                    label: const Text('Retry', style: TextStyle(fontSize: 12)),
                                   )
-                                else if (item.status == 'error')
-                                  const Text('❌ မအောင်မြင်ပါ (Retry သို့မဟုတ် ဆက်ထုတ်မယ် နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
-                                else if (item.outputPath != null)
-                                  const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
-                                else
-                                  Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                                else if (item.status == 'ready')
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: item.outputPath != null ? Colors.green : Colors.blueAccent,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                    ),
+                                    onPressed: item.isRendering ? null : () => _renderSinglePart(i),
+                                    icon: item.isRendering
+                                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                        : const Icon(Icons.movie_filter_rounded, size: 16),
+                                    label: Text(
+                                      item.isRendering
+                                          ? 'ထုတ်နေသည်'
+                                          : item.outputPath != null
+                                              ? 'ပြန်ထုတ်'
+                                              : '🎬 Render',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ),
                               ],
                             ),
-                          ),
-                          if (item.outputPath != null) ...[
-                            IconButton(
-                              tooltip: 'ဗီဒီယိုကြည့်မယ်',
-                              icon: const Icon(Icons.play_circle_fill, color: Colors.amberAccent, size: 30),
-                              onPressed: () => _watchRenderedVideo(item.outputPath!, 'Part ${item.partNumber} Render Video'),
-                            ),
-                            const SizedBox(width: 2),
-                          ],
-                          if (item.status == 'error')
-                            ElevatedButton.icon(
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.orangeAccent, foregroundColor: Colors.black),
-                              onPressed: _isGeneratingAll ? null : () => _retryPart(i),
-                              icon: const Icon(Icons.refresh, size: 16),
-                              label: const Text('Retry', style: TextStyle(fontSize: 12)),
-                            )
-                          else if (item.status == 'ready')
-                            ElevatedButton.icon(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: item.outputPath != null ? Colors.green : Colors.blueAccent,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                              ),
-                              onPressed: item.isRendering ? null : () => _renderSinglePart(i),
-                              icon: item.isRendering
-                                  ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                                  : const Icon(Icons.movie_filter_rounded, size: 16),
-                              label: Text(
-                                item.isRendering
-                                    ? 'ထုတ်နေသည်'
-                                    : item.outputPath != null
-                                        ? 'ပြန်ထုတ်'
-                                        : '🎬 Render',
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                            ),
-                        ],
+                          );
+                        },
                       ),
-                    );
-                  }),
+                    ),
+                  ),
                   if (completedCount >= 2) ...[
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 10),
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.green,
@@ -1097,8 +1184,55 @@ class _LongFormPageState extends State<LongFormPage> {
               ),
             ],
 
+            // Scrollable Editable Script Box
+            if (_editingPartIndex != null && _editingPartIndex! < _parts.length) ...[
+              _buildCard(
+                title: '✏️ Part ${_parts[_editingPartIndex!].partNumber} Script ပြင်ဆင်ရန် (Scroll ဆွဲပြီး စာတန်းပြင်ပါ)',
+                icon: Icons.edit_document,
+                children: [
+                  Container(
+                    height: 220,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0E1016),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.amberAccent.withOpacity(0.6)),
+                    ),
+                    child: Scrollbar(
+                      thumbVisibility: true,
+                      child: TextField(
+                        controller: _scriptEditCtrl,
+                        maxLines: null,
+                        expands: true,
+                        keyboardType: TextInputType.multiline,
+                        style: const TextStyle(fontSize: 12.5, height: 1.5, color: Colors.white),
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          hintText: '[0.00-3.20] မြန်မာစာတန်း...',
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amberAccent,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                    ),
+                    onPressed: _saveEditedScript,
+                    icon: const Icon(Icons.save_alt_rounded, size: 18),
+                    label: Text(
+                      '💾 Part ${_parts[_editingPartIndex!].partNumber} Script ပြင်ဆင်ချက် သိမ်းမယ်',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+
             if (_logs.isNotEmpty) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 4),
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
