@@ -41,7 +41,12 @@ class LongFormPage extends StatefulWidget {
 
 class _LongFormPageState extends State<LongFormPage> {
   String _geminiKeysRaw = '';
+  String _groqKey = '';
   final _geminiCtrl = TextEditingController();
+  final _groqCtrl = TextEditingController();
+
+  // Mode: 'dubbing' (Groq + Gemini ဘာသာပြန်) | 'recap' (Gemini Recap + 6s/3s Freeze)
+  String _workMode = 'dubbing';
 
   String? _videoPath;
   VideoPlayerController? _videoController;
@@ -74,7 +79,7 @@ class _LongFormPageState extends State<LongFormPage> {
   );
 
   String _voice = 'my-MM-ThihaNeural';
-  double _ttsRate = 35.0;
+  double _ttsRate = 25.0;
   final int _ttsPitch = 0;
   String _resolution = '720p';
 
@@ -96,30 +101,37 @@ class _LongFormPageState extends State<LongFormPage> {
   void dispose() {
     _videoController?.dispose();
     _geminiCtrl.dispose();
+    _groqCtrl.dispose();
     super.dispose();
   }
 
   Future<void> _loadSavedKeys() async {
     final prefs = await SharedPreferences.getInstance();
     final gem = (prefs.getString('gemini_keys') ?? prefs.getString('gemini_api_keys') ?? '').trim();
+    final groq = (prefs.getString('groq_api_key') ?? '').trim();
     setState(() {
       _geminiKeysRaw = gem;
+      _groqKey = groq;
       _geminiCtrl.text = gem;
+      _groqCtrl.text = groq;
     });
   }
 
   Future<void> _saveKeys() async {
     final prefs = await SharedPreferences.getInstance();
     final gem = _geminiCtrl.text.trim();
+    final groq = _groqCtrl.text.trim();
     await prefs.setString('gemini_keys', gem);
+    await prefs.setString('groq_api_key', groq);
     setState(() {
       _geminiKeysRaw = gem;
+      _groqKey = groq;
       _errorMsg = '';
     });
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('✅ Gemini API Keys သိမ်းဆည်းပြီးပါပြီ!'),
+          content: Text('✅ Gemini နှင့် Groq API Keys သိမ်းဆည်းပြီးပါပြီ!'),
           backgroundColor: Colors.green,
         ),
       );
@@ -197,13 +209,16 @@ class _LongFormPageState extends State<LongFormPage> {
     );
   }
 
-  // ၁။ ဗီဒီယိုခွဲပြီး (သို့) ရပ်ထားတဲ့အပိုင်းကနေ ပြန်ဆက်ပြီး 25s Cooldown ဖြင့် Script ထုတ်မည်
-  Future<void> _startOrResumeAutoRecap({bool freshStart = false}) async {
+  Future<void> _startOrResumeAutoProcess({bool freshStart = false}) async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
 
     if (geminiKeys.isEmpty) {
       setState(() => _errorMsg = 'အပေါ်က အကွက်မှာ Gemini API Key ထည့်ပြီး Save နှိပ်ပါ');
+      return;
+    }
+    if (_workMode == 'dubbing' && _groqKey.trim().isEmpty) {
+      setState(() => _errorMsg = 'Dubbing Mode အတွက် Groq API Key ထည့်ပြီး Save နှိပ်ပါ');
       return;
     }
     if (_videoPath == null) {
@@ -258,12 +273,10 @@ class _LongFormPageState extends State<LongFormPage> {
 
         final ok = await _generateSinglePart(i, geminiKeys);
         if (!ok) {
-          // Error တက်ရင် နောက်အပိုင်းကျော်မသွားဘဲ ချက်ချင်းရပ်မည် (ဇာတ်လမ်းအဆက်အစပ် မပြတ်စေရန်)
           _addLog('🛑 Part ${_parts[i].partNumber} မအောင်မြင်၍ ခဏရပ်ထားပါသည်။ ခဏစောင့်ပြီး "ဆက်ထုတ်မယ်" နှိပ်ပါ။');
           break;
         }
 
-        // နောက်အပိုင်းကျန်သေးရင် Limit မထိအောင် ၂၅ စက္ကန့် နားပေးမည်
         final hasMore = _parts.sublist(i + 1).any((p) => p.status != 'ready');
         if (hasMore && !_stopRequested) {
           _addLog('⏳ Limit မထိအောင် ၂၅ စက္ကန့် နားနေပါသည်...');
@@ -316,17 +329,34 @@ class _LongFormPageState extends State<LongFormPage> {
     try {
       final prevSummary = _getPreviousSummary(index);
       final prevTail = _getPreviousTailLines(index);
-      final result = await LongFormService().generateScriptForVideoPart(
-        videoPath: _videoPath!,
-        partNumber: item.partNumber,
-        totalParts: _parts.length,
-        chunkStartSec: item.startSec,
-        chunkDurSec: item.durSec,
-        previousSummary: prevSummary,
-        previousTailLines: prevTail,
-        geminiKeys: geminiKeys,
-        onLog: _addLog,
-      );
+
+      final Map result;
+      if (_workMode == 'dubbing') {
+        result = await LongFormService().generateDubbingScriptForPart(
+          videoPath: _videoPath!,
+          partNumber: item.partNumber,
+          totalParts: _parts.length,
+          chunkStartSec: item.startSec,
+          chunkDurSec: item.durSec,
+          previousSummary: prevSummary,
+          previousTailLines: prevTail,
+          groqApiKey: _groqKey,
+          geminiKeys: geminiKeys,
+          onLog: _addLog,
+        );
+      } else {
+        result = await LongFormService().generateScriptForVideoPart(
+          videoPath: _videoPath!,
+          partNumber: item.partNumber,
+          totalParts: _parts.length,
+          chunkStartSec: item.startSec,
+          chunkDurSec: item.durSec,
+          previousSummary: prevSummary,
+          previousTailLines: prevTail,
+          geminiKeys: geminiKeys,
+          onLog: _addLog,
+        );
+      }
 
       if (mounted) {
         setState(() {
@@ -356,6 +386,10 @@ class _LongFormPageState extends State<LongFormPage> {
       setState(() => _errorMsg = 'Gemini API Key မရှိပါ');
       return;
     }
+    if (_workMode == 'dubbing' && _groqKey.trim().isEmpty) {
+      setState(() => _errorMsg = 'Groq API Key မရှိပါ');
+      return;
+    }
     await _generateSinglePart(index, geminiKeys);
   }
 
@@ -370,28 +404,54 @@ class _LongFormPageState extends State<LongFormPage> {
 
     try {
       _blurBox.enabled = _enableBlur;
-      final outPath = await LongFormService().renderPart(
-        partNumber: item.partNumber,
-        partSegments: item.alignedSegments!,
-        videoPath: _videoPath!,
-        voice: _voice,
-        ratePercent: _ttsRate.round(),
-        pitchHz: _ttsPitch,
-        resolution: _resolution,
-        enableCopyrightSafe: _enableCopyrightSafe,
-        videoSpeed: _videoSpeed,
-        playSec: _playSec,
-        freezeSec: _freezeSec,
-        enableSubtitles: _enableSubtitles,
-        subY: _subY,
-        subScale: _subScale,
-        subColorAss: _subColorAss,
-        enableBlur: _enableBlur,
-        blurBox: _blurBox,
-        enableMirror: _enableMirror,
-        bgmPath: _bgmPath,
-        onLog: _addLog,
-      );
+      final String outPath;
+
+      if (_workMode == 'dubbing') {
+        outPath = await LongFormService().renderDubbingPart(
+          partNumber: item.partNumber,
+          chunkStartSec: item.startSec,
+          chunkDurSec: item.durSec,
+          partSegments: item.alignedSegments!,
+          videoPath: _videoPath!,
+          voice: _voice,
+          ratePercent: _ttsRate.round(),
+          pitchHz: _ttsPitch,
+          resolution: _resolution,
+          enableSubtitles: _enableSubtitles,
+          subY: _subY,
+          subScale: _subScale,
+          subColorAss: _subColorAss,
+          enableBlur: _enableBlur,
+          blurBox: _blurBox,
+          enableMirror: _enableMirror,
+          bgmPath: _bgmPath,
+          onLog: _addLog,
+        );
+      } else {
+        outPath = await LongFormService().renderPart(
+          partNumber: item.partNumber,
+          partSegments: item.alignedSegments!,
+          videoPath: _videoPath!,
+          voice: _voice,
+          ratePercent: _ttsRate.round(),
+          pitchHz: _ttsPitch,
+          resolution: _resolution,
+          enableCopyrightSafe: _enableCopyrightSafe,
+          videoSpeed: _videoSpeed,
+          playSec: _playSec,
+          freezeSec: _freezeSec,
+          enableSubtitles: _enableSubtitles,
+          subY: _subY,
+          subScale: _subScale,
+          subColorAss: _subColorAss,
+          enableBlur: _enableBlur,
+          blurBox: _blurBox,
+          enableMirror: _enableMirror,
+          bgmPath: _bgmPath,
+          onLog: _addLog,
+        );
+      }
+
       if (mounted) {
         setState(() => item.outputPath = outPath);
       }
@@ -657,7 +717,39 @@ class _LongFormPageState extends State<LongFormPage> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _buildCard(
-              title: '🔑 Gemini API Keys (25s Cooldown / Limit သက်သာ)',
+              title: '🎛️ အလုပ်လုပ်မည့် စနစ်ရွေးပါ (Mode)',
+              icon: Icons.tune_rounded,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: _workMode,
+                  decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'dubbing',
+                      child: Text('🎙️ Dubbing Mode (Groq အသံထုတ် + Gemini ဘာသာပြန် + 0.00s Sync)'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'recap',
+                      child: Text('🎬 Recap Mode (Gemini ဗီဒီယိုကြည့် + 6s/3s Freeze)'),
+                    ),
+                  ],
+                  onChanged: _isGeneratingAll
+                      ? null
+                      : (v) {
+                          if (v != null && v != _workMode) {
+                            setState(() {
+                              _workMode = v;
+                              _parts.clear();
+                              _mergedOutputPath = null;
+                            });
+                          }
+                        },
+                ),
+              ],
+            ),
+
+            _buildCard(
+              title: '🔑 API Keys (Gemini + Groq)',
               icon: Icons.vpn_key_rounded,
               children: [
                 TextField(
@@ -669,6 +761,17 @@ class _LongFormPageState extends State<LongFormPage> {
                     isDense: true,
                   ),
                 ),
+                if (_workMode == 'dubbing') ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _groqCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Groq API Key (gsk_...)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 8),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
@@ -707,11 +810,11 @@ class _LongFormPageState extends State<LongFormPage> {
                 const SizedBox(height: 10),
                 DropdownButtonFormField<int>(
                   value: _minutesPerPart,
-                  decoration: const InputDecoration(labelText: 'Gemini ဆီ ပို့မည့် အပိုင်းအရှည်', border: OutlineInputBorder()),
+                  decoration: const InputDecoration(labelText: 'အပိုင်းခွဲမည့် အရှည်', border: OutlineInputBorder()),
                   items: const [
-                    DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲပို့မယ် (အကောင်းဆုံး / Limit သက်သာ)')),
-                    DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲပို့မယ်')),
-                    DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲပို့မယ်')),
+                    DropdownMenuItem(value: 3, child: Text('၃ မိနစ်စီ ခွဲမယ် (မြန် / Limit သက်သာ)')),
+                    DropdownMenuItem(value: 5, child: Text('၅ မိနစ်စီ ခွဲမယ်')),
+                    DropdownMenuItem(value: 8, child: Text('၈ မိနစ်စီ ခွဲမယ်')),
                   ],
                   onChanged: _isGeneratingAll ? null : (v) => setState(() => _minutesPerPart = v ?? 3),
                 ),
@@ -719,7 +822,9 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: '၂။ Copyright-Safe Edit (Scene-Locked Sync + Mirror)',
+              title: _workMode == 'dubbing'
+                  ? '၂။ Video Edit (Mirror + Blur + Subtitle)'
+                  : '၂။ Copyright-Safe Edit (Zero-Drift + 6s/3s Freeze)',
               icon: Icons.shield_rounded,
               children: [
                 SwitchListTile(
@@ -728,27 +833,29 @@ class _LongFormPageState extends State<LongFormPage> {
                   value: _enableMirror,
                   onChanged: (v) => setState(() => _enableMirror = v),
                 ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Scene-Locked Speed + Freeze/Zoom ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
-                  value: _enableCopyrightSafe,
-                  onChanged: (v) => setState(() => _enableCopyrightSafe = v),
-                ),
-                if (_enableCopyrightSafe) ...[
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('မူရင်းဗီဒီယို Speed', style: TextStyle(fontSize: 12)),
-                      Text('${_videoSpeed.toStringAsFixed(2)}x', style: const TextStyle(color: Colors.lightBlueAccent)),
-                    ],
+                if (_workMode == 'recap') ...[
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Max 6s Play + 3s Freeze/Zoom ဖွင့်မယ်', style: TextStyle(fontSize: 13)),
+                    value: _enableCopyrightSafe,
+                    onChanged: (v) => setState(() => _enableCopyrightSafe = v),
                   ),
-                  Slider(
-                    value: _videoSpeed,
-                    min: 0.50,
-                    max: 1.00,
-                    divisions: 10,
-                    onChanged: (v) => setState(() => _videoSpeed = v),
-                  ),
+                  if (_enableCopyrightSafe) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('မူရင်းဗီဒီယို Speed', style: TextStyle(fontSize: 12)),
+                        Text('${_videoSpeed.toStringAsFixed(2)}x', style: const TextStyle(color: Colors.lightBlueAccent)),
+                      ],
+                    ),
+                    Slider(
+                      value: _videoSpeed,
+                      min: 0.50,
+                      max: 1.00,
+                      divisions: 10,
+                      onChanged: (v) => setState(() => _videoSpeed = v),
+                    ),
+                  ],
                 ],
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -820,7 +927,9 @@ class _LongFormPageState extends State<LongFormPage> {
                       label: Text(
                         _cooldownSec > 0
                             ? '⏳ Cooldown နားနေသည် (${_cooldownSec}s)...'
-                            : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...',
+                            : (_workMode == 'dubbing'
+                                ? 'Groq အသံထုတ် + Gemini ဘာသာပြန်နေသည်...'
+                                : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...'),
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                       ),
                     ),
@@ -838,22 +947,16 @@ class _LongFormPageState extends State<LongFormPage> {
                 ],
               ),
             ] else if (hasUnfinishedParts) ...[
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.orangeAccent,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      onPressed: () => _startOrResumeAutoRecap(freshStart: false),
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('▶️ ရပ်ထားတဲ့အပိုင်းကနေ ဆက်ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
-                    ),
-                  ),
-                ],
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orangeAccent,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                onPressed: () => _startOrResumeAutoProcess(freshStart: false),
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('▶️ ရပ်ထားတဲ့အပိုင်းကနေ ဆက်ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
               ),
             ] else ...[
               ElevatedButton.icon(
@@ -863,9 +966,14 @@ class _LongFormPageState extends State<LongFormPage> {
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                onPressed: () => _startOrResumeAutoRecap(freshStart: true),
+                onPressed: () => _startOrResumeAutoProcess(freshStart: true),
                 icon: const Icon(Icons.auto_awesome),
-                label: const Text('⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
+                label: Text(
+                  _workMode == 'dubbing'
+                      ? '⚡ ၁။ Groq အသံထုတ်ပြီး Gemini ဖြင့် ဘာသာပြန်မယ်'
+                      : '⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
             ],
 
@@ -905,7 +1013,12 @@ class _LongFormPageState extends State<LongFormPage> {
                                 if (item.status == 'pending')
                                   const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
                                 else if (item.status == 'generating')
-                                  const Text('👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...', style: TextStyle(fontSize: 11, color: Colors.amberAccent))
+                                  Text(
+                                    _workMode == 'dubbing'
+                                        ? '🎙️ Groq + Gemini ဘာသာပြန်နေသည်...'
+                                        : '👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...',
+                                    style: const TextStyle(fontSize: 11, color: Colors.amberAccent),
+                                  )
                                 else if (item.status == 'error')
                                   const Text('❌ မအောင်မြင်ပါ (Retry သို့မဟုတ် ဆက်ထုတ်မယ် နှိပ်ပါ)', style: TextStyle(fontSize: 11, color: Colors.redAccent))
                                 else if (item.outputPath != null)
@@ -975,7 +1088,7 @@ class _LongFormPageState extends State<LongFormPage> {
                         foregroundColor: Colors.black,
                         padding: const EdgeInsets.symmetric(vertical: 12),
                       ),
-                      onPressed: () => _watchRenderedVideo(_mergedOutputPath!, 'YouTube Long Recap (Merged)'),
+                      onPressed: () => _watchRenderedVideo(_mergedOutputPath!, 'YouTube Long Video (Merged)'),
                       icon: const Icon(Icons.play_circle_filled),
                       label: const Text('▶️ ပေါင်းပြီးသား ဗီဒီယိုကို အခုကြည့်မယ်', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
