@@ -10,7 +10,475 @@ import 'edge_tts_service.dart';
 import 'ffmpeg_service.dart';
 
 class LongFormService {
-  // ၁။ 240p 1fps ဖြတ်ထုတ်ပြီး ၅ မိနစ်စာ အသေးစိတ် (~၃၀ ခန်း / ၆ စက္ကန့်ခွာ) Script ထုတ်မည်
+  // =========================================================================
+  // MODE A: GROQ (အသံထုတ်) + GEMINI (ဗီဒီယိုကြည့် + အတိအကျဘာသာပြန်) DUBBING
+  // =========================================================================
+
+  // ၁။ ဗီဒီယိုတစ်ပိုင်းစာရဲ့ အသံကိုဖြတ်ပြီး Groq Whisper ဖြင့် Timestamp + Script ထုတ်မည်
+  Future<List>> transcribePartWithGroq({
+    required String videoPath,
+    required int partNumber,
+    required int totalParts,
+    required double chunkStartSec,
+    required double chunkDurSec,
+    required String groqApiKey,
+    Function(String)? onLog,
+  }) async {
+    final tempDir = Directory.systemTemp;
+    final audioClipPath = '${tempDir.path}/groq_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp3';
+
+    onLog?.call('Part $partNumber/$totalParts: Groq အတွက် အသံဖိုင် ဖြတ်ထုတ်နေသည်...');
+    final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
+        '-vn -ac 1 -ar 16000 -b:a 32k "$audioClipPath"';
+
+    final cutSession = await FFmpegKit.execute(cutCmd);
+    if (!ReturnCode.isSuccess(await cutSession.getReturnCode())) {
+      throw Exception('Part $partNumber အသံဖြတ်ထုတ်မရပါ');
+    }
+
+    final audioFile = File(audioClipPath);
+    try {
+      onLog?.call('Part $partNumber/$totalParts: Groq Whisper ဖြင့် စကားပြော Script ထုတ်နေသည်...');
+      final uri = Uri.parse('https://api.groq.com/openai/v1/audio/transcriptions');
+      final request = http.MultipartRequest('POST', uri)
+        ..headers['Authorization'] = 'Bearer ${groqApiKey.trim()}'
+        ..fields['model'] = 'whisper-large-v3-turbo'
+        ..fields['response_format'] = 'verbose_json'
+        ..files.add(await http.MultipartFile.fromPath('file', audioClipPath));
+
+      final streamedRes = await request.send().timeout(const Duration(seconds: 90));
+      final resBody = await streamedRes.stream.bytesToString();
+
+      if (streamedRes.statusCode != 200) {
+        throw Exception('Groq HTTP ${streamedRes.statusCode}: $resBody');
+      }
+
+      final json = jsonDecode(resBody);
+      final rawSegments = (json['segments'] as List?) ?? [];
+      final List> result = [];
+
+      for (final seg in rawSegments) {
+        final text = (seg['text'] ?? '').toString().trim();
+        if (text.isEmpty) continue;
+        final start = (seg['start'] as num).toDouble();
+        final end = (seg['end'] as num).toDouble();
+        result.add({
+          'start': start,
+          'end': end > start ? end : start + 1.5,
+          'text': text,
+        });
+      }
+
+      onLog?.call('✅ Part $partNumber: Groq Script ထုတ်ပြီး (${result.length} ကြောင်း)။');
+      return result;
+    } finally {
+      try {
+        if (await audioFile.exists()) await audioFile.delete();
+      } catch (_) {}
+    }
+  }
+
+  // ၂။ ဗီဒီယိုကို Gemini ကြည့်ခိုင်းပြီး Groq Script ကို မြန်မာလို အတိအကျ ဘာသာပြန်ခိုင်းမည်
+  Future generateDubbingScriptForPart({
+    required String videoPath,
+    required int partNumber,
+    required int totalParts,
+    required double chunkStartSec,
+    required double chunkDurSec,
+    required String previousSummary,
+    String previousTailLines = '',
+    required String groqApiKey,
+    required List<String> geminiKeys,
+    Function(String)? onLog,
+  }) async {
+    // (က) Groq ဖြင့် မူရင်း Script + Timestamp ထုတ်မည်
+    final groqSegments = await transcribePartWithGroq(
+      videoPath: videoPath,
+      partNumber: partNumber,
+      totalParts: totalParts,
+      chunkStartSec: chunkStartSec,
+      chunkDurSec: chunkDurSec,
+      groqApiKey: groqApiKey,
+      onLog: onLog,
+    );
+
+    if (groqSegments.isEmpty) {
+      return {
+        'segments': [],
+        'summary': previousSummary,
+        'tailLines': previousTailLines,
+      };
+    }
+
+    final transcriptBuf = StringBuffer();
+    for (final s in groqSegments) {
+      transcriptBuf.writeln('[${(s['start'] as double).toStringAsFixed(2)}-${(s['end'] as double).toStringAsFixed(2)}] ${s['text']}');
+    }
+
+    // (ခ) Gemini ကြည့်ဖို့ 240p 0.5fps ဗီဒီယိုအသေး ဖြတ်ထုတ်မည်
+    final tempDir = Directory.systemTemp;
+    final smallClipPath = '${tempDir.path}/gemini_dub_p${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+
+    onLog?.call('Part $partNumber/$totalParts: Gemini ကြည့်ဖို့ 240p ဖိုင်အသေး ဖြတ်ထုတ်နေသည်...');
+    final cutCmd = '-y -ss ${chunkStartSec.toStringAsFixed(2)} -t ${chunkDurSec.toStringAsFixed(2)} -i "$videoPath" '
+        '-vf "scale=-2:240,fps=0.5" -c:v libx264 -preset ultrafast -crf 35 -an -movflags +faststart "$smallClipPath"';
+
+    final cutSession = await FFmpegKit.execute(cutCmd);
+    if (!ReturnCode.isSuccess(await cutSession.getReturnCode())) {
+      throw Exception('Part $partNumber ဗီဒီယိုဖြတ်ထုတ်မရပါ');
+    }
+
+    final clipFile = File(smallClipPath);
+    final base64Video = base64Encode(await clipFile.readAsBytes());
+
+    final contextBuf = StringBuffer();
+    if (previousSummary.trim().isNotEmpty) {
+      contextBuf.writeln('PREVIOUS STORY SUMMARY (keep character names & pronouns consistent):');
+      contextBuf.writeln(previousSummary.trim());
+    }
+
+    final prompt = '''
+You are a professional Burmese movie dubbing translator.
+Watch this video clip (PART $partNumber of $totalParts) to understand the exact scene, speaker gender, tone, and context.
+Then translate EVERY SINGLE LINE of the provided original transcript strictly and accurately into natural spoken Burmese.
+
+${contextBuf.toString()}
+
+ORIGINAL TRANSCRIPT (with exact timestamps):
+${transcriptBuf.toString()}
+
+STRICT RULES:
+1. First line MUST be: SUMMARY: <2 short sentences in Burmese summarizing key events & character names so far>
+2. Translate EVERY line from the ORIGINAL TRANSCRIPT faithfully—do NOT skip lines, do NOT merge lines, do NOT invent extra lines.
+3. KEEP THE EXACT [start-end] TIMESTAMPS UNCHANGED from the original transcript.
+4. Keep Burmese sentences concise and natural so spoken TTS fits inside each [start-end] duration.
+5. Output format strictly:
+SUMMARY: ...
+[0.00-3.20] မြန်မာဘာသာပြန် စာကြောင်း...
+6. No markdown, no extra commentary.
+''';
+
+    final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
+    final int startKeyIdx = (partNumber - 1) % geminiKeys.length;
+    String? lastError;
+
+    try {
+      for (final model in models) {
+        for (int k = 0; k < geminiKeys.length; k++) {
+          final keyIdx = (startKeyIdx + k) % geminiKeys.length;
+          final key = geminiKeys[keyIdx];
+          for (int attempt = 1; attempt <= 2; attempt++) {
+            onLog?.call('Part $partNumber/$totalParts → $model | Key ${keyIdx + 1}/${geminiKeys.length} ဘာသာပြန်နေသည်...');
+            try {
+              final uri = Uri.parse(
+                'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$key',
+              );
+              final res = await http
+                  .post(
+                    uri,
+                    headers: {'Content-Type': 'application/json'},
+                    body: jsonEncode({
+                      'contents': [
+                        {
+                          'parts': [
+                            {
+                              'inline_data': {
+                                'mime_type': 'video/mp4',
+                                'data': base64Video,
+                              }
+                            },
+                            {'text': prompt}
+                          ]
+                        }
+                      ],
+                      'generationConfig': {'temperature': 0.2},
+                    }),
+                  )
+                  .timeout(const Duration(seconds: 120));
+
+              if (res.statusCode == 200) {
+                final json = jsonDecode(res.body);
+                final out = json['candidates']?[0]?['content']?['parts']?[0]?['text']?.toString().trim();
+                if (out != null && out.isNotEmpty) {
+                  String newSummary = previousSummary;
+                  final summaryMatch = RegExp(r'^SUMMARY:\s*(.+)$', multiLine: true).firstMatch(out);
+                  if (summaryMatch != null) {
+                    newSummary = summaryMatch.group(1)!.trim();
+                  }
+
+                  // Dubbing မှာ Timestamp တွေကို ဒီ Part ရဲ့ Relative (0.0 မှစ) အတိုင်း သိမ်းထားမည်
+                  final segments = parseAlignedSegments(out, offsetSec: 0.0);
+                  if (segments.isNotEmpty) {
+                    final tailList = segments.length >= 2 ? segments.sublist(segments.length - 2) : segments;
+                    final tailLines = tailList.map((e) => e['text'].toString()).join('\n');
+                    onLog?.call('✅ Part $partNumber/$totalParts ဘာသာပြန်ပြီး (${segments.length} ကြောင်း)။');
+                    return {
+                      'segments': segments,
+                      'summary': newSummary,
+                      'tailLines': tailLines,
+                    };
+                  }
+                }
+              }
+
+              lastError = '[$model] HTTP ${res.statusCode}: ${res.body}';
+              if (res.statusCode == 404) break;
+              if ((res.statusCode == 503 || res.statusCode == 429) && attempt == 1) {
+                onLog?.call('⏳ Limit/Server ကျပ်နေသည် (${res.statusCode}) → ၁၂ စက္ကန့်စောင့်နေသည်...');
+                await Future.delayed(const Duration(seconds: 12));
+                continue;
+              }
+              break;
+            } catch (e) {
+              lastError = e.toString();
+              if (attempt == 1) {
+                onLog?.call('⚠️ ချိတ်ဆက်မှုနှေးနေသည် → ၅ စက္ကန့်စောင့်ပြီး ပြန်စမ်းနေသည်...');
+                await Future.delayed(const Duration(seconds: 5));
+                continue;
+              }
+            }
+          }
+          if (lastError != null && lastError.contains('HTTP 404')) break;
+        }
+      }
+      throw Exception('Part $partNumber ဘာသာပြန်မရပါ: $lastError');
+    } finally {
+      try {
+        if (await clipFile.exists()) await clipFile.delete();
+      } catch (_) {}
+    }
+  }
+
+  // ၃။ Dubbing Render: စာကြောင်းတိုင်းကို မီလီစက္ကန့်အတိအကျ (0.00s Drift) ညှိပြီး ဗီဒီယိုနဲ့ ပေါင်းထုတ်မည်
+  Future<String> renderDubbingPart({
+    required int partNumber,
+    required double chunkStartSec,
+    required double chunkDurSec,
+    required List partSegments,
+    required String videoPath,
+    required String voice,
+    required int ratePercent,
+    required int pitchHz,
+    required String resolution,
+    required bool enableSubtitles,
+    required double subY,
+    required double subScale,
+    required String subColorAss,
+    required bool enableBlur,
+    required BlurBox blurBox,
+    bool enableMirror = false,
+    String? bgmPath,
+    double bgmVolume = 0.15,
+    bool saveToGallery = true,
+    Function(String)? onLog,
+  }) async {
+    final tempDir = Directory.systemTemp;
+    final ffmpeg = FfmpegService();
+    final tts = EdgeTtsService();
+
+    final audioConcatBuf = StringBuffer();
+    final srtBuf = StringBuffer();
+    double curAudioPos = 0.0;
+    int srtIdx = 1;
+
+    for (int i = 0; i < partSegments.length; i++) {
+      final double relStart = (partSegments[i]['vStart'] as num).toDouble().clamp(0.0, chunkDurSec);
+      final double relEnd = (partSegments[i]['vEnd'] as num).toDouble().clamp(relStart + 0.3, chunkDurSec);
+      final String text = (partSegments[i]['text'] ?? '').toString().trim();
+      if (text.isEmpty) continue;
+
+      final double nextStart = (i + 1 < partSegments.length)
+          ? (partSegments[i + 1]['vStart'] as num).toDouble().clamp(relEnd, chunkDurSec)
+          : chunkDurSec;
+
+      onLog?.call('Part $partNumber: Dubbing TTS (${i + 1}/${partSegments.length}) ထုတ်ညှိနေသည်...');
+
+      // (က) စကားမပြောခင် ကြားကွက်လပ်ကို Silence အတိအကျ ဖြည့်မည်
+      if (relStart > curAudioPos + 0.02) {
+        final double gap = relStart - curAudioPos;
+        final gapPath = '${tempDir.path}/dub_p${partNumber}_gap_$i.m4a';
+        final sGap = await FFmpegKit.execute(
+          '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${gap.toStringAsFixed(3)} -c:a aac -b:a 64k "$gapPath"',
+        );
+        if (ReturnCode.isSuccess(await sGap.getReturnCode())) {
+          audioConcatBuf.writeln("file '$gapPath'");
+          final realGap = await ffmpeg.getDuration(gapPath);
+          curAudioPos += (realGap > 0.01 ? realGap : gap);
+        }
+      }
+
+      // (ခ) ဒီစာကြောင်းအတွက် TTS ထုတ်မည်
+      final rawLinePath = '${tempDir.path}/dub_p${partNumber}_raw_$i.mp3';
+      final dummySrtPath = '${tempDir.path}/dub_p${partNumber}_tmp_$i.srt';
+      await tts.synthesizeAuto(
+        text: text,
+        voice: voice,
+        ratePercent: ratePercent,
+        pitchHz: pitchHz,
+        audioOutPath: rawLinePath,
+        srtOutPath: dummySrtPath,
+      );
+
+      final double rawDur = await ffmpeg.getDuration(rawLinePath);
+      final double maxSlot = (nextStart - curAudioPos).clamp(0.35, 30.0);
+      final fitLinePath = '${tempDir.path}/dub_p${partNumber}_fit_$i.m4a';
+
+      // (ဂ) မြန်မာအသံက အချိန်ဘောင်ထက် ရှည်နေရင် atempo နဲ့ ကွက်တိဝင်အောင် ချုံ့မည် (နောက်တစ်ကြောင်း နောက်မကျစေရန်)
+      String aFilter = 'aresample=24000';
+      if (rawDur > maxSlot && maxSlot > 0.35) {
+        final double tempo = (rawDur / maxSlot).clamp(1.0, 2.0);
+        aFilter = 'atempo=${tempo.toStringAsFixed(4)},aresample=24000';
+      }
+
+      final sFit = await FFmpegKit.execute(
+        '-y -i "$rawLinePath" -af "$aFilter" -ac 1 -ar 24000 -c:a aac -b:a 96k "$fitLinePath"',
+      );
+      if (ReturnCode.isSuccess(await sFit.getReturnCode())) {
+        audioConcatBuf.writeln("file '$fitLinePath'");
+        final realDur = await ffmpeg.getDuration(fitLinePath);
+        final usedDur = realDur > 0.05 ? realDur : rawDur;
+
+        final startMs = (curAudioPos * 1000).round();
+        final endMs = ((curAudioPos + usedDur) * 1000).round();
+        srtBuf.writeln('${srtIdx++}');
+        srtBuf.writeln('${_formatSrtTime(startMs)} --> ${_formatSrtTime(endMs)}');
+        srtBuf.writeln(text);
+        srtBuf.writeln();
+
+        curAudioPos += usedDur;
+      }
+    }
+
+    // အဆုံးပိုင်း ကျန်နေသေးရင် Silence ဖြည့်မည်
+    if (chunkDurSec > curAudioPos + 0.05) {
+      final tailGap = chunkDurSec - curAudioPos;
+      final tailPath = '${tempDir.path}/dub_p${partNumber}_tail.m4a';
+      final sTail = await FFmpegKit.execute(
+        '-y -f lavfi -i anullsrc=r=24000:cl=mono -t ${tailGap.toStringAsFixed(3)} -c:a aac -b:a 64k "$tailPath"',
+      );
+      if (ReturnCode.isSuccess(await sTail.getReturnCode())) {
+        audioConcatBuf.writeln("file '$tailPath'");
+      }
+    }
+
+    final audioListFile = File('${tempDir.path}/dub_p${partNumber}_alist.txt');
+    await audioListFile.writeAsString(audioConcatBuf.toString());
+
+    final finalDubAudioPath = '${tempDir.path}/dub_p${partNumber}_full.m4a';
+    final sConcatA = await FFmpegKit.execute(
+      '-y -f concat -safe 0 -i "${audioListFile.path}" -c copy "$finalDubAudioPath"',
+    );
+    if (!ReturnCode.isSuccess(await sConcatA.getReturnCode())) {
+      throw Exception('Part $partNumber Dubbing အသံများ ပေါင်းမရပါ');
+    }
+
+    final srtPath = '${tempDir.path}/dub_p${partNumber}_subs.srt';
+    await File(srtPath).writeAsString(srtBuf.toString(), encoding: utf8);
+
+    // (ဃ) ဗီဒီယိုနဲ့ အသံ + စာတန်း + Mirror + Blur + BGM ပေါင်းထုတ်မည်
+    final vidInfo = await ffmpeg.getVideoInfo(videoPath);
+    final int srcW = vidInfo['width'] as int;
+    final int srcH = vidInfo['height'] as int;
+
+    final int targetShort = resolution == '1080p' ? 1080 : 720;
+    int outW;
+    int outH;
+    if (srcH >= srcW) {
+      outW = targetShort;
+      outH = (((srcH * targetShort) / srcW).round() ~/ 2) * 2;
+    } else {
+      outH = targetShort;
+      outW = (((srcW * targetShort) / srcH).round() ~/ 2) * 2;
+    }
+
+    final outputPath = '${tempDir.path}/Dubbing_Part_${partNumber}_${DateTime.now().millisecondsSinceEpoch}.mp4';
+    final filterBuf = StringBuffer();
+    filterBuf.writeln('[0:v]scale=$outW:$outH,fps=30[v_scaled];');
+    String currentV = 'v_scaled';
+
+    if (enableBlur && blurBox.enabled) {
+      final bx = blurBox.x.clamp(0.0, 0.95).toStringAsFixed(4);
+      final by = blurBox.y.clamp(0.0, 0.95).toStringAsFixed(4);
+      final bw = blurBox.w.clamp(0.05, 1.0 - blurBox.x).toStringAsFixed(4);
+      final bh = blurBox.h.clamp(0.05, 1.0 - blurBox.y).toStringAsFixed(4);
+      filterBuf.writeln(
+        '[$currentV]split[m1][b1];'
+        '[b1]crop=iw*$bw:ih*$bh:iw*$bx:ih*$by,boxblur=10:2[bl1];'
+        '[m1][bl1]overlay=W*$bx:H*$by[v_blur];',
+      );
+      currentV = 'v_blur';
+    }
+
+    if (enableMirror) {
+      filterBuf.writeln('[$currentV]hflip[v_flip];');
+      currentV = 'v_flip';
+    }
+
+    if (enableSubtitles && srtBuf.isNotEmpty) {
+      final fontDir = await _prepareFontDir();
+      final assPath = await _convertSrtToAss(
+        srtPath: srtPath,
+        outW: outW,
+        outH: outH,
+        subY: subY,
+        subScale: subScale,
+        subColorAss: subColorAss,
+      );
+      filterBuf.writeln('[$currentV]ass=$assPath:fontsdir=$fontDir:shaping=complex[v_out];');
+      currentV = 'v_out';
+    }
+
+    String audioInputArgs = '-i "$finalDubAudioPath"';
+    if (bgmPath != null && bgmPath.isNotEmpty && File(bgmPath).existsSync()) {
+      audioInputArgs += ' -stream_loop -1 -i "$bgmPath"';
+      filterBuf.write(
+        '[1:a]aresample=async=1:first_pts=0[tts_a];'
+        '[2:a]volume=${bgmVolume.toStringAsFixed(2)}[bgm_a];'
+        '[tts_a][bgm_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]',
+      );
+    } else {
+      filterBuf.write('[1:a]aresample=async=1:first_pts=0[a_out]');
+    }
+
+    final filterScriptPath = '${tempDir.path}/dub_p${partNumber}_filter.txt';
+    await File(filterScriptPath).writeAsString(filterBuf.toString(), encoding: utf8);
+
+    onLog?.call('Part $partNumber: Dubbing ဗီဒီယို Render ထုတ်နေသည်...');
+    final finalCmd = '-y -ss ${chunkStartSec.toStringAsFixed(3)} -t ${chunkDurSec.toStringAsFixed(3)} -i "$videoPath" $audioInputArgs '
+        '-filter_complex_script "$filterScriptPath" '
+        '-map "[$currentV]" -map "[a_out]" '
+        '-c:v libx264 -preset ultrafast -crf 25 -threads 2 -pix_fmt yuv420p '
+        '-c:a aac -b:a 128k -movflags +faststart -t ${chunkDurSec.toStringAsFixed(3)} "$outputPath"';
+
+    final finalSession = await FFmpegKit.execute(finalCmd);
+    if (!ReturnCode.isSuccess(await finalSession.getReturnCode())) {
+      final logs = await finalSession.getAllLogsAsString();
+      throw Exception('Part $partNumber Dubbing Render မအောင်မြင်ပါ:\n$logs');
+    }
+
+    if (saveToGallery) {
+      try {
+        await Gal.putVideo(outputPath, album: 'Myanmar Recap');
+        onLog?.call('✅ Part $partNumber (Dubbing) ကို Gallery ထဲ သိမ်းပြီးပါပြီ။');
+      } catch (_) {}
+    }
+
+    return outputPath;
+  }
+
+  String _formatSrtTime(int ms) {
+    final safeMs = ms < 0 ? 0 : ms;
+    final h = (safeMs ~/ 3600000).toString().padLeft(2, '0');
+    final m = ((safeMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
+    final s = ((safeMs % 60000) ~/ 1000).toString().padLeft(2, '0');
+    final rem = (safeMs % 1000).toString().padLeft(3, '0');
+    return '$h:$m:$s,$rem';
+  }
+
+  // =========================================================================
+  // MODE B: GEMINI RECAP MODE (အရင် Recap စနစ်)
+  // =========================================================================
+
   Future generateScriptForVideoPart({
     required String videoPath,
     required int partNumber,
@@ -41,7 +509,6 @@ class LongFormService {
 
     final base64Video = base64Encode(await clipFile.readAsBytes());
 
-    // ၅ မိနစ် (300s) ဆိုလျှင် ~၂၈–၃၂ ခန်း (တစ်ခန်းလျှင် ~4s ယူပြီး ကြားထဲ ~6s ခွာ)
     final int targetMinLines = (chunkDurSec / 11).round().clamp(12, 35);
     final int targetMaxLines = (chunkDurSec / 9).round().clamp(16, 40);
 
@@ -70,11 +537,7 @@ STRICT REQUIREMENTS:
 4. CRITICAL SYNC RULE: Every [start-end] timestamp MUST match the EXACT second when that visual action/scene happens on screen.
 5. Format EVERY narration line strictly as: [start-end] Burmese text
    (start and end in seconds relative to THIS clip, from 0.0 to ${chunkDurSec.toStringAsFixed(1)})
-6. Example:
-SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီး ရန်သူတွေနဲ့ စတင်တွေ့ဆုံခဲ့သည်။
-[0.0-4.0] မင်းသားက မှောင်မိုက်နေတဲ့ လမ်းကြားထဲကို ဘေးဘီဝဲယာကြည့်ရင်း သတိကြီးကြီးနဲ့ ဝင်လာခဲ့ပါတယ်။
-[10.0-14.0] အဲဒီအချိန်မှာပဲ နောက်ကျောကနေ ရန်သူတစ်ယောက်က ဓားရှည်ကြီးနဲ့ ရုတ်တရက် ဝင်ခုတ်လိုက်ပါတယ်။
-7. No markdown, no bold text, no extra explanations.
+6. No markdown, no bold text, no extra explanations.
 ''';
 
     final models = ['gemini-3.5-flash', 'gemini-3.8-flash'];
@@ -127,9 +590,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
 
                   final segments = parseAlignedSegments(out, offsetSec: chunkStartSec);
                   if (segments.isNotEmpty) {
-                    final tailList = segments.length >= 2
-                        ? segments.sublist(segments.length - 2)
-                        : segments;
+                    final tailList = segments.length >= 2 ? segments.sublist(segments.length - 2) : segments;
                     final tailLines = tailList.map((e) => e['text'].toString()).join('\n');
 
                     onLog?.call('✅ Part $partNumber/$totalParts ($model) Script ထုတ်ပြီး (${segments.length} ခန်း)။');
@@ -272,7 +733,6 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     return assPath;
   }
 
-  // ၂။ Zero-Drift Scene Sync (Clip တစ်ခုထုတ်တိုင်း တကယ့်အရှည် ပြန်တိုင်း) + Max 6s Play / 3s Freeze & Zoom
   Future<String> renderPart({
     required int partNumber,
     required List partSegments,
@@ -339,7 +799,6 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     int clipCounter = 0;
     bool zoomInToggle = true;
 
-    // Zero-Drift Timeline Tracker (တကယ့်ထွက်လာတဲ့ Clip အရှည်ကို ပြန်တိုင်းပြီး ညှိမည်)
     double targetTotalVid = 0.0;
     double actualTotalVid = 0.0;
     double playAcc = 0.0;
@@ -375,7 +834,6 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
         double curSrcPos = vStart;
 
         while (remaining > 0.08) {
-          // (က) 6s ပြည့်လို့ Freeze အလှည့်ရောက်ရင် (သို့) လက်ရှိအခန်း vEnd ကုန်သွားရင် Freeze + Zoom In/Out
           if (freezeRem > 0.08 || curSrcPos >= vEnd - 0.1) {
             final double fDur = (freezeRem > 0.08)
                 ? (remaining < freezeRem ? remaining : freezeRem)
@@ -416,7 +874,6 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
               playAcc = 0.0;
             }
           } else {
-            // (ခ) Max 6s Play (0.65x Speed ဖြင့် 6s ထက်လုံးဝမကျော်ဘဲ ပြမည်)
             final double needPlay = (playSec - playAcc).clamp(0.15, playSec);
             final double maxSrcLeft = (vEnd - curSrcPos).clamp(0.05, 60.0);
             final double maxPlayFromScene = maxSrcLeft * ptsMult;
@@ -541,7 +998,7 @@ SUMMARY: မင်းသားက ရွာထဲရောက်လာပြီ�
     return outputPath;
   }
 
-  // ၃။ Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
+  // Part တွေအားလုံးကို YouTube ဗီဒီယိုတစ်ပုဒ်တည်း ပေါင်းမည် (-c copy)
   Future<String> mergeAllParts({
     required List<String> partPaths,
     Function(String)? onLog,
