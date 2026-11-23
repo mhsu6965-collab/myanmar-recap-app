@@ -15,7 +15,7 @@ class LongFormService {
   // =========================================================================
 
   // ၁။ ဗီဒီယိုတစ်ပိုင်းစာရဲ့ အသံကိုဖြတ်ပြီး Groq Whisper ဖြင့် Timestamp + Script ထုတ်မည်
-  Future<List>> transcribePartWithGroq({
+  Future<List> transcribePartWithGroq({
     required String videoPath,
     required int partNumber,
     required int totalParts,
