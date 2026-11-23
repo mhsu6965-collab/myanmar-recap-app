@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
@@ -49,8 +50,8 @@ class _LongFormPageState extends State<LongFormPage> {
   final _scriptEditCtrl = TextEditingController();
   int? _editingPartIndex;
 
-  // Mode: 'dubbing' (Groq + Gemini ဘာသာပြန်) | 'recap' (Gemini Recap + 6s/3s Freeze)
-  String _workMode = 'dubbing';
+  // Mode: 'groq_only' (Groq Script ထုတ် + ကိုယ်တိုင်ဘာသာပြန်) | 'dubbing' (Groq + Gemini Auto) | 'recap' (Gemini Recap)
+  String _workMode = 'groq_only';
 
   String? _videoPath;
   VideoPlayerController? _videoController;
@@ -82,8 +83,8 @@ class _LongFormPageState extends State<LongFormPage> {
     h: 0.14,
   );
 
-  String _voice = 'my-MM-ThihaNeural';
-  double _ttsRate = 25.0;
+  String _voice = 'my-MM-NilarNeural';
+  double _ttsRate = 20.0;
   final int _ttsPitch = 0;
   String _resolution = '720p';
 
@@ -136,7 +137,7 @@ class _LongFormPageState extends State<LongFormPage> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('✅ Gemini နှင့် Groq API Keys သိမ်းဆည်းပြီးပါပြီ!'),
+          content: Text('✅ API Keys သိမ်းဆည်းပြီးပါပြီ!'),
           backgroundColor: Colors.green,
         ),
       );
@@ -161,7 +162,6 @@ class _LongFormPageState extends State<LongFormPage> {
     });
   }
 
-  // Script Editor ထဲသို့ ရွေးထားသော Part ၏ Script ကို ထည့်ပေးမည်
   void _openScriptEditor(int index) {
     final item = _parts[index];
     if (item.alignedSegments == null || item.alignedSegments!.isEmpty) return;
@@ -180,14 +180,56 @@ class _LongFormPageState extends State<LongFormPage> {
     });
   }
 
-  // ပြင်ဆင်ပြီးသား Script ကို ပြန်သိမ်းမည်
+  // Gemini Web / ChatGPT မှာ တန်းကူးထည့်ပြီး ဘာသာပြန်ခိုင်းနိုင်ရန် Prompt ပါ Copy ကူးပေးမည်
+  Future<void> _copyScriptWithPrompt() async {
+    final raw = _scriptEditCtrl.text.trim();
+    if (raw.isEmpty) return;
+
+    final promptText = '''
+အောက်က Script ကို ဇာတ်ကားထဲကလို သဘာဝကျတဲ့ မြန်မာပြောစကား (တိုတိုနဲ့ သွက်သွက်) အတိအကျ ဘာသာပြန်ပေးပါ။
+စည်းကမ်း:
+1. ရှေ့က [start-end] အချိန်တွေကို လုံးဝမပြောင်းပါနဲ့။
+2. စာကြောင်းတစ်ကြောင်းမှ မကျော်ဘဲ တစ်ကြောင်းချင်းစီ ပြန်ပေးပါ။
+3. ဘာသာပြန်ထားတဲ့ [start-end] စာကြောင်းတွေကိုပဲ ထုတ်ပေးပါ (အပိုစကားမထည့်ပါနဲ့)။
+
+$raw
+''';
+
+    await Clipboard.setData(ClipboardData(text: promptText));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('📋 Prompt + Script Copy ကူးပြီးပါပြီ! Gemini/ChatGPT မှာ Paste ချပြီး ဘာသာပြန်ပါ။'),
+          backgroundColor: Colors.blueAccent,
+        ),
+      );
+    }
+  }
+
+  Future<void> _pasteScriptFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null && data!.text!.trim().isNotEmpty) {
+      setState(() {
+        _scriptEditCtrl.text = data.text!.trim();
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('📥 Paste ထည့်ပြီးပါပြီ! အောက်က "သိမ်းမယ်" ခလုတ်ကို နှိပ်ပါ။'),
+            backgroundColor: Colors.teal,
+          ),
+        );
+      }
+    }
+  }
+
   void _saveEditedScript() {
     if (_editingPartIndex == null || _editingPartIndex! >= _parts.length) return;
     final parsed = LongFormService().parseAlignedSegments(_scriptEditCtrl.text, offsetSec: 0.0);
     if (parsed.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('⚠️ [0.00-3.00] စာသား ပုံစံအတိုင်း မှန်အောင် ရေးပေးပါ'),
+          content: Text('⚠️ [0.00-3.00] စာသား ပုံစံအတိုင်း မှန်အောင် ထည့်ပေးပါ'),
           backgroundColor: Colors.redAccent,
         ),
       );
@@ -198,7 +240,7 @@ class _LongFormPageState extends State<LongFormPage> {
     setState(() {
       _parts[idx].alignedSegments = parsed;
     });
-    _addLog('✏️ Part ${_parts[idx].partNumber} Script ကို ပြင်ဆင်သိမ်းဆည်းပြီး (${parsed.length} ကြောင်း)။');
+    _addLog('💾 Part ${_parts[idx].partNumber} Script သိမ်းဆည်းပြီး (${parsed.length} ကြောင်း)။');
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('✅ Part ${_parts[idx].partNumber} Script (${parsed.length} ကြောင်း) သိမ်းပြီးပါပြီ!'),
@@ -266,12 +308,12 @@ class _LongFormPageState extends State<LongFormPage> {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
 
-    if (geminiKeys.isEmpty) {
+    if (_workMode != 'groq_only' && geminiKeys.isEmpty) {
       setState(() => _errorMsg = 'အပေါ်က အကွက်မှာ Gemini API Key ထည့်ပြီး Save နှိပ်ပါ');
       return;
     }
-    if (_workMode == 'dubbing' && _groqKey.trim().isEmpty) {
-      setState(() => _errorMsg = 'Dubbing Mode အတွက် Groq API Key ထည့်ပြီး Save နှိပ်ပါ');
+    if ((_workMode == 'groq_only' || _workMode == 'dubbing') && _groqKey.trim().isEmpty) {
+      setState(() => _errorMsg = 'Groq API Key (gsk_...) ထည့်ပြီး Save နှိပ်ပါ');
       return;
     }
     if (_videoPath == null) {
@@ -334,8 +376,9 @@ class _LongFormPageState extends State<LongFormPage> {
 
         final hasMore = _parts.sublist(i + 1).any((p) => p.status != 'ready');
         if (hasMore && !_stopRequested) {
-          _addLog('⏳ Limit မထိအောင် ၂၅ စက္ကန့် နားနေပါသည်...');
-          for (int sec = 25; sec > 0; sec--) {
+          final waitSec = _workMode == 'groq_only' ? 3 : 25;
+          _addLog('⏳ ခဏနားနေပါသည် (${waitSec}s)...');
+          for (int sec = waitSec; sec > 0; sec--) {
             if (_stopRequested || !mounted) break;
             setState(() => _cooldownSec = sec);
             await Future.delayed(const Duration(seconds: 1));
@@ -382,6 +425,37 @@ class _LongFormPageState extends State<LongFormPage> {
     });
 
     try {
+      if (_workMode == 'groq_only') {
+        final rawList = await LongFormService().transcribePartWithGroq(
+          videoPath: _videoPath!,
+          partNumber: item.partNumber,
+          totalParts: _parts.length,
+          chunkStartSec: item.startSec,
+          chunkDurSec: item.durSec,
+          groqApiKey: _groqKey,
+          onLog: _addLog,
+        );
+
+        final List mapped = rawList.map((e) {
+          return {
+            'vStart': (e['start'] as num).toDouble(),
+            'vEnd': (e['end'] as num).toDouble(),
+            'text': (e['text'] ?? '').toString().trim(),
+          };
+        }).toList();
+
+        if (mounted) {
+          setState(() {
+            item.alignedSegments = mapped;
+            item.status = 'ready';
+          });
+          if (_editingPartIndex == null) {
+            _openScriptEditor(index);
+          }
+        }
+        return true;
+      }
+
       final prevSummary = _getPreviousSummary(index);
       final prevTail = _getPreviousTailLines(index);
 
@@ -440,11 +514,11 @@ class _LongFormPageState extends State<LongFormPage> {
   Future<void> _retryPart(int index) async {
     await _loadSavedKeys();
     final geminiKeys = _parseGeminiKeys();
-    if (geminiKeys.isEmpty) {
+    if (_workMode != 'groq_only' && geminiKeys.isEmpty) {
       setState(() => _errorMsg = 'Gemini API Key မရှိပါ');
       return;
     }
-    if (_workMode == 'dubbing' && _groqKey.trim().isEmpty) {
+    if ((_workMode == 'groq_only' || _workMode == 'dubbing') && _groqKey.trim().isEmpty) {
       setState(() => _errorMsg = 'Groq API Key မရှိပါ');
       return;
     }
@@ -464,7 +538,7 @@ class _LongFormPageState extends State<LongFormPage> {
       _blurBox.enabled = _enableBlur;
       final String outPath;
 
-      if (_workMode == 'dubbing') {
+      if (_workMode == 'groq_only' || _workMode == 'dubbing') {
         outPath = await LongFormService().renderDubbingPart(
           partNumber: item.partNumber,
           chunkStartSec: item.startSec,
@@ -783,8 +857,12 @@ class _LongFormPageState extends State<LongFormPage> {
                   decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
                   items: const [
                     DropdownMenuItem(
+                      value: 'groq_only',
+                      child: Text('⚡ Groq Script ထုတ် (ကိုယ်တိုင်ဘာသာပြန် + Smart Sync)'),
+                    ),
+                    DropdownMenuItem(
                       value: 'dubbing',
-                      child: Text('🎙️ Dubbing Mode (Groq အသံထုတ် + Gemini ဘာသာပြန် + Smart Sync)'),
+                      child: Text('🎙️ Dubbing Auto (Groq + Gemini API ဘာသာပြန်)'),
                     ),
                     DropdownMenuItem(
                       value: 'recap',
@@ -809,20 +887,22 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: '🔑 API Keys (Gemini + Groq)',
+              title: _workMode == 'groq_only' ? '🔑 Groq API Key (Gemini Key မလို)' : '🔑 API Keys (Gemini + Groq)',
               icon: Icons.vpn_key_rounded,
               children: [
-                TextField(
-                  controller: _geminiCtrl,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText: 'Gemini API Keys (တစ်ခုထက်ပိုရင် Enter ခေါက်ထည့်ပါ)',
-                    border: OutlineInputBorder(),
-                    isDense: true,
+                if (_workMode != 'groq_only') ...[
+                  TextField(
+                    controller: _geminiCtrl,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      labelText: 'Gemini API Keys (တစ်ခုထက်ပိုရင် Enter ခေါက်ထည့်ပါ)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
                   ),
-                ),
-                if (_workMode == 'dubbing') ...[
                   const SizedBox(height: 8),
+                ],
+                if (_workMode == 'groq_only' || _workMode == 'dubbing') ...[
                   TextField(
                     controller: _groqCtrl,
                     decoration: const InputDecoration(
@@ -831,8 +911,8 @@ class _LongFormPageState extends State<LongFormPage> {
                       isDense: true,
                     ),
                   ),
+                  const SizedBox(height: 8),
                 ],
-                const SizedBox(height: 8),
                 ElevatedButton.icon(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.teal,
@@ -882,9 +962,9 @@ class _LongFormPageState extends State<LongFormPage> {
             ),
 
             _buildCard(
-              title: _workMode == 'dubbing'
-                  ? '၂။ Video Edit (Mirror + Blur + Subtitle)'
-                  : '၂။ Copyright-Safe Edit (Zero-Drift + 6s/3s Freeze)',
+              title: _workMode == 'recap'
+                  ? '၂။ Copyright-Safe Edit (Zero-Drift + 6s/3s Freeze)'
+                  : '၂။ Video Edit (Mirror + Blur + Subtitle + Smart Sync)',
               icon: Icons.shield_rounded,
               children: [
                 SwitchListTile(
@@ -940,10 +1020,10 @@ class _LongFormPageState extends State<LongFormPage> {
                   value: _voice,
                   decoration: const InputDecoration(labelText: 'အသံရွေးပါ', border: OutlineInputBorder()),
                   items: const [
-                    DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
                     DropdownMenuItem(value: 'my-MM-NilarNeural', child: Text('Nilar (အမျိုးသမီး)')),
+                    DropdownMenuItem(value: 'my-MM-ThihaNeural', child: Text('Thiha (အမျိုးသား)')),
                   ],
-                  onChanged: (v) => setState(() => _voice = v ?? 'my-MM-ThihaNeural'),
+                  onChanged: (v) => setState(() => _voice = v ?? 'my-MM-NilarNeural'),
                 ),
                 const SizedBox(height: 8),
                 Row(
@@ -986,10 +1066,12 @@ class _LongFormPageState extends State<LongFormPage> {
                       icon: const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
                       label: Text(
                         _cooldownSec > 0
-                            ? '⏳ Cooldown နားနေသည် (${_cooldownSec}s)...'
-                            : (_workMode == 'dubbing'
-                                ? 'Groq အသံထုတ် + Gemini ဘာသာပြန်နေသည်...'
-                                : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...'),
+                            ? '⏳ ခဏနားနေသည် (${_cooldownSec}s)...'
+                            : (_workMode == 'groq_only'
+                                ? 'Groq ဖြင့် Script ထုတ်နေသည်...'
+                                : _workMode == 'dubbing'
+                                    ? 'Groq + Gemini ဘာသာပြန်နေသည်...'
+                                    : 'Gemini ဗီဒီယိုကြည့်ပြီး Script ထုတ်နေသည်...'),
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                       ),
                     ),
@@ -1029,9 +1111,11 @@ class _LongFormPageState extends State<LongFormPage> {
                 onPressed: () => _startOrResumeAutoProcess(freshStart: true),
                 icon: const Icon(Icons.auto_awesome),
                 label: Text(
-                  _workMode == 'dubbing'
-                      ? '⚡ ၁။ Groq အသံထုတ်ပြီး Gemini ဖြင့် ဘာသာပြန်မယ်'
-                      : '⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်',
+                  _workMode == 'groq_only'
+                      ? '⚡ ၁။ Groq ဖြင့် အပိုင်းအလိုက် Script ထုတ်မယ် (Limit မထိ)'
+                      : _workMode == 'dubbing'
+                          ? '⚡ ၁။ Groq အသံထုတ်ပြီး Gemini ဖြင့် ဘာသာပြန်မယ်'
+                          : '⚡ ၁။ ဗီဒီယိုခွဲပြီး Gemini ဖြင့် Script ထုတ်မယ်',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ),
@@ -1040,10 +1124,9 @@ class _LongFormPageState extends State<LongFormPage> {
             if (_parts.isNotEmpty) ...[
               const SizedBox(height: 14),
               _buildCard(
-                title: '၄။ အပိုင်းအလိုက် Render ထုတ်ပါ (${_parts.length} ပိုင်း • Scroll ဆွဲကြည့်ပါ)',
+                title: '၄။ အပိုင်းအလိုက် Script ပြင်ပြီး Render ထုတ်ပါ (${_parts.length} ပိုင်း • Scroll)',
                 icon: Icons.playlist_play_rounded,
                 children: [
-                  // Scrollable Parts Box
                   Container(
                     height: 300,
                     padding: const EdgeInsets.all(6),
@@ -1090,9 +1173,11 @@ class _LongFormPageState extends State<LongFormPage> {
                                         const Text('⏳ စောင့်ဆိုင်းနေသည်...', style: TextStyle(fontSize: 11, color: Colors.white54))
                                       else if (item.status == 'generating')
                                         Text(
-                                          _workMode == 'dubbing'
-                                              ? '🎙️ Groq + Gemini ဘာသာပြန်နေသည်...'
-                                              : '👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...',
+                                          _workMode == 'groq_only'
+                                              ? '⚡ Groq Script ထုတ်နေသည်...'
+                                              : _workMode == 'dubbing'
+                                                  ? '🎙️ Groq + Gemini ဘာသာပြန်နေသည်...'
+                                                  : '👀 Gemini ဗီဒီယိုကြည့်ပြီး Script ရေးနေသည်...',
                                           style: const TextStyle(fontSize: 11, color: Colors.amberAccent),
                                         )
                                       else if (item.status == 'error')
@@ -1100,13 +1185,13 @@ class _LongFormPageState extends State<LongFormPage> {
                                       else if (item.outputPath != null)
                                         const Text('✅ ဗီဒီယိုထုတ်ပြီး (Gallery ထဲသိမ်းပြီး)', style: TextStyle(fontSize: 11, color: Colors.greenAccent))
                                       else
-                                        Text('🟢 Script အသင့်ဖြစ်ပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း)', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
+                                        Text('🟢 Script ရပြီ (${item.alignedSegments?.length ?? 0} ကြောင်း) • ✏️ နှိပ်ပြီး ဘာသာပြန်/ပြင်ပါ', style: const TextStyle(fontSize: 11, color: Colors.lightBlueAccent)),
                                     ],
                                   ),
                                 ),
                                 if (item.status == 'ready')
                                   IconButton(
-                                    tooltip: 'Script ပြင်မယ်',
+                                    tooltip: 'Script ဖွင့်/ပြင်မယ်',
                                     icon: Icon(
                                       Icons.edit_note_rounded,
                                       color: isEditing ? Colors.amberAccent : Colors.lightBlueAccent,
@@ -1184,14 +1269,34 @@ class _LongFormPageState extends State<LongFormPage> {
               ),
             ],
 
-            // Scrollable Editable Script Box
+            // Scrollable Editable Script Box + Copy Prompt & Paste
             if (_editingPartIndex != null && _editingPartIndex! < _parts.length) ...[
               _buildCard(
-                title: '✏️ Part ${_parts[_editingPartIndex!].partNumber} Script ပြင်ဆင်ရန် (Scroll ဆွဲပြီး စာတန်းပြင်ပါ)',
+                title: '✏️ Part ${_parts[_editingPartIndex!].partNumber} Script (Copy ကူးပြီး ဘာသာပြန် → Paste ပြန်ထည့်ပါ)',
                 icon: Icons.edit_document,
                 children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _copyScriptWithPrompt,
+                          icon: const Icon(Icons.copy_all_rounded, size: 16, color: Colors.lightBlueAccent),
+                          label: const Text('📋 Prompt ပါ Copy', style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _pasteScriptFromClipboard,
+                          icon: const Icon(Icons.content_paste_rounded, size: 16, color: Colors.greenAccent),
+                          label: const Text('📥 Paste ထည့်မယ်', style: TextStyle(fontSize: 12)),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
                   Container(
-                    height: 220,
+                    height: 230,
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0E1016),
@@ -1223,7 +1328,7 @@ class _LongFormPageState extends State<LongFormPage> {
                     onPressed: _saveEditedScript,
                     icon: const Icon(Icons.save_alt_rounded, size: 18),
                     label: Text(
-                      '💾 Part ${_parts[_editingPartIndex!].partNumber} Script ပြင်ဆင်ချက် သိမ်းမယ်',
+                      '💾 Part ${_parts[_editingPartIndex!].partNumber} ဘာသာပြန် Script သိမ်းမယ် (Save)',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                   ),
