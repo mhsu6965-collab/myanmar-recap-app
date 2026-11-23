@@ -55,7 +55,7 @@ class LongFormService {
 
       final json = jsonDecode(resBody);
       final rawSegments = (json['segments'] as List?) ?? [];
-      final List> result = [];
+      final List result = [];
 
       for (final seg in rawSegments) {
         final text = (seg['text'] ?? '').toString().trim();
